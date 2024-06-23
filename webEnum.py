@@ -188,9 +188,14 @@ class Config:
             word = word.strip()
             if word:
                 result.add(word)
+
+                if config.add_slash and not word.endswith("/"):
+                    result.add(f"{word}/")
+
                 if self.extensions is not None:
                     for ext in self.extensions:
                         result.add(f"{word}.{ext}")
+                        
         result = list(result)
         result.sort()
         return result
