@@ -9,6 +9,7 @@ from time import sleep
 from inspect import currentframe
 from urllib.parse import urlparse
 from alive_progress import alive_bar
+from colorama import Fore, Style, init
 
 
 class Config:
@@ -24,18 +25,18 @@ class Config:
         # General arguments
         parser.add_argument("-u", "--url", metavar="", required=True, help="Target url.",)
         parser.add_argument("-w", "--wordlist", metavar="", required=True, help="Path to the wordlist to use.")
-        parser.add_argument("-M", "--http-method", metavar="", choices=["GET", "HEAD", "POST"], default="GET", help="HTTP method to use.")
+        parser.add_argument("-m", "--http-method", metavar="", choices=["GET", "HEAD", "POST"], default="GET", help="HTTP method to use.")
         parser.add_argument("-H", "--http-headers", metavar="", help="Set custom HTTP headers. Ex: Header1=Value1,Header2=Value2")
-        parser.add_argument("-A", "--user-agent", metavar="", default="yoMamma", help="User-Agent to use in the HTTP request")
-        parser.add_argument("-R", "--random-ua", action="store_true", help="Randomize user agent.")
-        parser.add_argument("-C", "--cookies", metavar="", help="Cookies to use in the HTTP request. Ex: Cookie1=Value1,Cookie2=Value2")
+        parser.add_argument("-a", "--user-agent", metavar="", default="yoMamma", help="User-Agent to use in the HTTP request")
+        parser.add_argument("-r", "--random-ua", action="store_true", help="Randomize user agent.")
+        parser.add_argument("-c", "--cookies", metavar="", help="Cookies to use in the HTTP request. Ex: Cookie1=Value1,Cookie2=Value2")
         parser.add_argument("-b", "--body-data", metavar="", help="Body data to use in the HTTP POST request.")
-        parser.add_argument("-P", "--proxy", metavar="", help="Proxy to use. Ex: http;http://localhost:8080")
-        parser.add_argument("-x", "--extension", metavar="", help="Add file extensions to every request. Ex: php,js,...")
+        parser.add_argument("-p", "--proxy", metavar="", help="Proxy to use. Ex: http;http://localhost:8080")
+        parser.add_argument("-x", "--extensions", metavar="", help="Add file extensions to every request. Ex: php,js,...")
         parser.add_argument("-j", "--json", action="store_true", help="Use json formatted data in the HTTP POST request. ")
         parser.add_argument("-s", "--add-slash", action="store_true", help="Add slash to every request.")
         parser.add_argument("-f", "--follow", action="store_true", default=False, help="Follow HTTP redirections")
-        parser.add_argument("-I", "--ignore-errors", action="store_true", help="Ignore script errors.")
+        parser.add_argument("-i", "--ignore-errors", action="store_true", help="Ignore script errors.")
         parser.add_argument("--usage", action="store_true", help="Print usage message")
         parser.add_argument("-V", "--verify-cert", action="store_true", help="Verify SSL certificates. Default -> False")
 
@@ -63,6 +64,9 @@ class Config:
         args = parser.parse_args()
 
         self.url           = self.validate_url(args.url)
+        # extensions validation should be first than the wordlist parsing because
+        # the validate_wordlist function uses it    
+        self.extensions     = self.validate_extensions(args.extensions) if args.extensions else None
         self.wordlist      = self.validate_wordlist(args.wordlist)
         self.wordlist_path = args.wordlist
         self.http_method   = self.validate_http_method(args.http_method) if args.http_method else None
@@ -71,8 +75,7 @@ class Config:
         self.random_ua     = args.random_ua
         self.cookies       = self.validate_cookies(args.cookies) if args.cookies else None
         self.body_data     = args.body_data
-        self.proxy         = args.proxy
-        self.extension     = args.extension
+        self.proxy         = self.validate_url(args.proxy) if args.proxy else None
         self.json          = args.json
         self.add_slash     = args.add_slash
         self.follow        = args.follow
@@ -125,6 +128,38 @@ class Config:
             result += "/"
         return result
     
+    def validate_extensions(self, raw_extensions: str) -> list:
+        """validate extensions following the format "php,js,txt" and 
+        returns a list containing the extensions comma separated    
+
+        Args:
+            raw_extensions (str): the extensions supposed to follow the format "php,js,txt..."
+
+        Returns:
+            list: list containing the comma separated extensions.
+        """
+
+        extensions = raw_extensions.split(',')
+
+        if len(extensions) == 0:
+            show_error(
+                "",
+                f"function::{currentframe().f_code.co_name}",
+                "Invalid extensions provided. Use -x php,txt,js,..."
+            )
+            exit(-1)
+
+        for ext in extensions:
+            if not ext.isalnum():
+                show_error(
+                    "",
+                    f"function::{currentframe().f_code.co_name}",
+                    "Invalid extensions provided. Use -x php,txt,js,..."
+                )
+                exit(-1)
+
+        return extensions
+
     def validate_wordlist(self, wordlist):
         """Validate the wordlist and return a list with the words contained inside the wordlist.
 
@@ -153,8 +188,12 @@ class Config:
             word = word.strip()
             if word:
                 result.add(word)
-        
-        return list(result)
+                if self.extensions is not None:
+                    for ext in self.extensions:
+                        result.add(f"{word}.{ext}")
+        result = list(result)
+        result.sort()
+        return result
 
     def validate_http_method(self, method):
         # no validations yet
@@ -229,18 +268,20 @@ class Config:
                 f"function::{currentframe().f_code.co_name}",
                 "invalid status code filter specified. Use -hsc 400,401,500 "
             )
+            exit(1)
 
-        return status_codes
-            
+        return result        
+
     def show_config(self):
-        print("="*50)
-        print("[!] %15s: %s"%("URL", self.url))
-        print("[!] %15s: %s"%("WORDLIST", self.wordlist_path))
-        print("[!] %15s: %s"%("METHOD", self.http_method))
-        print("[!] %15s: %s"%("EXTENSIONS", self.extension))
-        print("[!] %15s: %s"%("TASKS", self.tasks))
-        print("[!] %15s: %s"%("TIMEOUT", self.timeout))
-        print("="*50)
+        print("╔" + "═"*80 + "╗")
+        print("║ %13s: %s"%("URL", self.url))
+        print("║ %13s: %s"%("WORDLIST", self.wordlist_path))
+        print("║ %13s: %s"%("METHOD", self.http_method))
+        print("║ %13s: %s"%("EXTENSIONS", self.extensions))
+        print("║ %13s: %s"%("TASKS", self.tasks))
+        print("║ %13s: %s"%("TIMEOUT", self.timeout))
+        print("║ %13s: %s"%("HIDE STATUS", self.hide_status_code))
+        print("╚" + "═"*80 + "╝")
         print()
 
 
@@ -269,10 +310,38 @@ async def fetch(session, url):
 
             # poping a word from worldist 
             path = f"{url}{config.wordlist.pop()}"
-
-        async with session.get(path) as resp:
+        
+        request_start_time = asyncio.get_event_loop().time()
+        async with session.get(path, proxy=config.proxy) as resp:
             if resp.status not in config.hide_status_code:
-                print("[status_code: %-3s] -> [url: %s]" % (resp.status, resp.url))
+
+                request_end_time = asyncio.get_event_loop().time()
+                response_time = request_end_time - request_start_time
+
+                if resp.status in range(200, 300):
+                    status_color = Fore.GREEN
+                elif resp.status in range(400, 500):
+                    status_color = Fore.RED
+                else:
+                    status_color = Fore.YELLOW
+
+                # reading response 
+                content = await resp.read()
+                content_length = len(content)
+                
+                output_msg_1 =  f"{status_color}[StatusCode: {resp.status}]  "
+                output_msg_1 += f"{Fore.CYAN}[ContentLength: {content_length} b]  "
+                output_msg_1 += f"{Fore.BLUE}[ResponseTime: {response_time:.2f} ms]{Fore.LIGHTBLACK_EX}"
+
+                output_msg_2 = f"URL: {Fore.LIGHTMAGENTA_EX}{resp.url}{Fore.LIGHTBLACK_EX}"
+
+                print(f"{Fore.LIGHTBLACK_EX}╔══════════════════════════════════════════════════════════════════════════╗")
+                print(f"{Fore.LIGHTBLACK_EX}║ %-92s ║"%(output_msg_1))
+                print(f"{Fore.LIGHTBLACK_EX}║ %-82s ║"%(output_msg_2))
+                print(f"{Fore.LIGHTBLACK_EX}╚══════════════════════════════════════════════════════════════════════════╝")
+
+
+                #print("[SC: %-3s][CL: %-5s] -> [URL: %s]" % (resp.status, len(await resp.read()), resp.url))
         
         config.bar()
 
@@ -288,13 +357,31 @@ async def main():
 
     
 if __name__ == "__main__":
+
+    # init colorama
+    init(autoreset=True)
+    
+    # parsing arguments
     config = Config()
     config.show_config()
     sleep(3)    
 
-    with alive_bar(len(config.wordlist)) as bar:
-        config.bar = bar
-        asyncio.run(main())
+
+    try:
+        # progress bar configuration
+        progress_bar = alive_bar(
+            len(config.wordlist), 
+            enrich_print=False,
+            title="Processing"
+        )
+
+        with progress_bar as bar:
+            config.bar = bar
+            asyncio.run(main())
+
+    except KeyboardInterrupt:
+        print("\n[X] KeyBoard Interrupt...")
+        print("[!] Finishing the program")
 
 
 # TODO:
