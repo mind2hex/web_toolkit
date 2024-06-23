@@ -10,6 +10,7 @@ from inspect import currentframe
 from urllib.parse import urlparse
 from alive_progress import alive_bar
 from colorama import Fore, Style, init
+from fake_useragent import UserAgent
 
 
 class Config:
@@ -64,9 +65,11 @@ class Config:
         args = parser.parse_args()
 
         self.url           = self.validate_url(args.url)
-        # extensions validation should be first than the wordlist parsing because
-        # the validate_wordlist function uses it    
-        self.extensions     = self.validate_extensions(args.extensions) if args.extensions else None
+
+        # extensions and add_slash should be added to self before the wordlist because
+        # the validate_wordlist function uses self.extensions and self.add_slash
+        self.extensions    = self.validate_extensions(args.extensions) if args.extensions else None
+        self.add_slash     = args.add_slash
         self.wordlist      = self.validate_wordlist(args.wordlist)
         self.wordlist_path = args.wordlist
         self.http_method   = self.validate_http_method(args.http_method) if args.http_method else None
@@ -77,7 +80,6 @@ class Config:
         self.body_data     = args.body_data
         self.proxy         = self.validate_url(args.proxy) if args.proxy else None
         self.json          = args.json
-        self.add_slash     = args.add_slash
         self.follow        = args.follow
         self.ignore_errors = args.ignore_errors
         self.usage         = args.usage
@@ -87,7 +89,6 @@ class Config:
         self.timeout  = args.timeout
         self.timewait = args.timewait
         self.retries  = args.retries
-        self.lock     = asyncio.Lock()
 
         self.verbose = args.verbose
         self.debug   = args.debug
@@ -98,6 +99,12 @@ class Config:
         #self.hide_content_length = [] if args.hide_content_length is None else self.validate_content_length(args.hide_content_length.split(","))
         #self.hide_web_server     = [] if args.hide_web_server is None else self.validate_web_server(args.hide_web_server.split(","))
         #self.hide_regex          = args.hide_regex
+
+        # asynchronous lock to avoid every task accessing the same resource at the same time
+        self.lock     = asyncio.Lock()
+
+        # dynamic user agent for random user generation
+        self.dynamic_ua = UserAgent()
     
     def validate_url(self, url):
         """Validate and return the url.
@@ -189,13 +196,13 @@ class Config:
             if word:
                 result.add(word)
 
-                if config.add_slash and not word.endswith("/"):
+                if self.add_slash and not word.endswith("/"):
                     result.add(f"{word}/")
 
                 if self.extensions is not None:
                     for ext in self.extensions:
                         result.add(f"{word}.{ext}")
-                        
+
         result = list(result)
         result.sort()
         return result
@@ -282,6 +289,8 @@ class Config:
         print("║ %13s: %s"%("URL", self.url))
         print("║ %13s: %s"%("WORDLIST", self.wordlist_path))
         print("║ %13s: %s"%("METHOD", self.http_method))
+        print("║ %13s: %s"%("USER AGENT", self.user_agent))
+        print("║ %13s: %s"%("RANDOM UA", self.random_ua))
         print("║ %13s: %s"%("EXTENSIONS", self.extensions))
         print("║ %13s: %s"%("TASKS", self.tasks))
         print("║ %13s: %s"%("TIMEOUT", self.timeout))
@@ -315,9 +324,14 @@ async def fetch(session, url):
 
             # poping a word from worldist 
             path = f"{url}{config.wordlist.pop()}"
+
+        # local headers
+        headers = {}            
+        if config.random_ua:
+            headers["User-Agent"] = config.dynamic_ua.random
         
         request_start_time = asyncio.get_event_loop().time()
-        async with session.get(path, proxy=config.proxy) as resp:
+        async with session.get(path, headers=headers, proxy=config.proxy) as resp:
             if resp.status not in config.hide_status_code:
 
                 request_end_time = asyncio.get_event_loop().time()
@@ -354,9 +368,21 @@ async def fetch(session, url):
 async def main():
 
     connector = aiohttp.TCPConnector(ssl=config.verify_cert)
-    timeout   = aiohttp.ClientTimeout(total=config.timeout) 
+    timeout   = aiohttp.ClientTimeout(total=config.timeout)
 
-    async with aiohttp.ClientSession(timeout=timeout, connector=connector) as session:
+    # global headers to use in all sessions
+    headers = {
+        "User-Agent": config.user_agent 
+    }
+
+    # client session configuration
+    client_session =  aiohttp.ClientSession(
+        timeout=timeout, 
+        connector=connector,
+        headers=headers        
+    )
+
+    async with client_session as session:
         tasks = [fetch(session, config.url) for _ in range(config.tasks)]
         await asyncio.gather(*tasks)
 
@@ -370,7 +396,6 @@ if __name__ == "__main__":
     config = Config()
     config.show_config()
     sleep(3)    
-
 
     try:
         # progress bar configuration
@@ -390,3 +415,6 @@ if __name__ == "__main__":
 
 
 # TODO:
+
+# FIXME:
+# - proxy utility is failing idk why. aiohttp.client_exceptions.ServerDisconnectedError: Server disconnected
