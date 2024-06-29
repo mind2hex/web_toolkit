@@ -5,16 +5,18 @@
 import aiohttp
 import asyncio
 import argparse
-from time import sleep
+import time
 from inspect import currentframe
 from urllib.parse import urlparse
 from alive_progress import alive_bar
-from colorama import Fore, Style, init
+from colorama import Fore, init
 from fake_useragent import UserAgent
 
 
 class Config:
-    def __init__(self):
+    """This class is simply to store parsed arguments"""
+
+    def __init__(self):    
         parser = argparse.ArgumentParser(
             prog="./webEnum.py",
             usage="./webEnum.py [options] -u {url} -w {wordlist}",
@@ -65,13 +67,9 @@ class Config:
         args = parser.parse_args()
 
         self.url           = self.validate_url(args.url)
-
-        # extensions and add_slash should be added to self before the wordlist because
-        # the validate_wordlist function uses self.extensions and self.add_slash
+        self.wordlist_path = self.validate_wordlist(args.wordlist)
         self.extensions    = self.validate_extensions(args.extensions) if args.extensions else None
         self.add_slash     = args.add_slash
-        self.wordlist      = self.validate_wordlist(args.wordlist)
-        self.wordlist_path = args.wordlist
         self.http_method   = self.validate_http_method(args.http_method) if args.http_method else None
         self.http_headers  = self.validate_http_headers(args.http_headers) if args.http_headers else None
         self.user_agent    = self.validate_user_agent(args.user_agent) if args.user_agent else None
@@ -99,6 +97,10 @@ class Config:
         #self.hide_content_length = [] if args.hide_content_length is None else self.validate_content_length(args.hide_content_length.split(","))
         #self.hide_web_server     = [] if args.hide_web_server is None else self.validate_web_server(args.hide_web_server.split(","))
         #self.hide_regex          = args.hide_regex
+
+        # create wordlist generator to yield words instead of loading all words to memory
+        self.wordlist       = self.wordlist_generator(self.wordlist_path, self.extensions, self.add_slash)
+        self.wordlist_count = self.count_lines(self.wordlist_path)
 
         # asynchronous lock to avoid every task accessing the same resource at the same time
         self.lock     = asyncio.Lock()
@@ -167,45 +169,34 @@ class Config:
 
         return extensions
 
-    def validate_wordlist(self, wordlist):
-        """Validate the wordlist and return a list with the words contained inside the wordlist.
-
-        This function do the following:
-        - Check that the file exist and is readable.
-        - Deletes repeated and empty words.
+    def validate_wordlist(self, wordlist_path: str) -> str:
+        """simply checks that the wordlist exist and is accessible...
 
         Args:
-            wordlist (str): Path of the wordlist to read.
+            wordlist_path (str): path to the wordlist.
 
         Returns:
-            list: List containing the words inside wordlist.
+            str: returns the path of the wordlist if checks passed successfully.
         """
         try:
-            wordlist_file = open(wordlist, 'r') 
-        except:
+            open(wordlist_path, 'r')
+        except FileNotFoundError:
             show_error(
-                f"Invalid WORDLIST --> {wordlist}",
+                f"Invalid WORDLIST --> {wordlist_path}",
                 f"function::{currentframe().f_code.co_name}",
                 "error while trying to open the wordlist. Check that the wordlist exist",
             )
             exit(-1)
-
-        result = set()
-        for word in wordlist_file.readlines():
-            word = word.strip()
-            if word:
-                result.add(word)
-
-                if self.add_slash and not word.endswith("/"):
-                    result.add(f"{word}/")
-
-                if self.extensions is not None:
-                    for ext in self.extensions:
-                        result.add(f"{word}.{ext}")
-
-        result = list(result)
-        result.sort()
-        return result
+        
+        except PermissionError:
+            show_error(
+                f"Invalid WORDLIST --> {wordlist_path}",
+                f"function::{currentframe().f_code.co_name}",
+                "Insufficient permissions to open the wordlist. Check that the current user has read access to the wordlist",
+            )
+            exit(-1)
+        
+        return wordlist_path
 
     def validate_http_method(self, method):
         # no validations yet
@@ -284,36 +275,73 @@ class Config:
 
         return result        
 
+    def wordlist_generator(self, wordlist_path, extensions=None, add_slash=False):
+        """generate a wordlist to yield words.
+
+        Args:
+            wordlist_path (str): Path to the wordlist to use.
+            extensions (list, optional): Add extensions to every word in the wordlist. Defaults to [].
+            add_slash (bool, optional): Add a slash to every word in the wordlist. Defaults to False.
+
+        Yields:
+            str: The next word iteration in the wordlist.
+        """        
+
+        wordlist_file = open(wordlist_path, 'r') 
+
+        for word in wordlist_file.readlines():
+            word = word.strip()
+            if word:
+                yield word
+
+                if extensions:
+                    for ext in self.extensions:
+                        yield f"{word}.{ext}"
+
+                if add_slash and not word.endswith("/"):
+                    yield f"{word}/"
+
+    def count_lines(self, wordlist_path:str) -> int:
+        """count the lines of a file.
+
+        Args:
+            wordlist_path (str): path to the wordlist to read.
+
+        Returns:
+            int: total lines of the file.
+        """
+        with open(wordlist_path, 'rb') as f:
+            return sum(1 for line in f)
+
     def show_config(self):
         print("╔" + "═"*80 + "╗")
-        print("║ %13s: %s"%("URL", self.url))
-        print("║ %13s: %s"%("WORDLIST", self.wordlist_path))
-        print("║ %13s: %s"%("METHOD", self.http_method))
-        print("║ %13s: %s"%("USER AGENT", self.user_agent))
-        print("║ %13s: %s"%("RANDOM UA", self.random_ua))
-        print("║ %13s: %s"%("EXTENSIONS", self.extensions))
-        print("║ %13s: %s"%("TASKS", self.tasks))
-        print("║ %13s: %s"%("TIMEOUT", self.timeout))
-        print("║ %13s: %s"%("HIDE STATUS", self.hide_status_code))
+        print("║ %13s: %-64s║"%("URL", self.url))
+        print("║ %13s: %-64s║"%("WORDLIST", self.wordlist_path))
+        print("║ %13s: %-64s║"%("METHOD", self.http_method))
+        print("║ %13s: %-64s║"%("USER AGENT", self.user_agent))
+        print("║ %13s: %-64s║"%("RANDOM UA", self.random_ua))
+        print("║ %13s: %-64s║"%("EXTENSIONS", self.extensions))
+        print("║ %13s: %-64s║"%("TASKS", self.tasks))
+        print("║ %13s: %-64s║"%("TIMEOUT", self.timeout))
+        print("║ %13s: %-64s║"%("HIDE STATUS", self.hide_status_code))
         print("╚" + "═"*80 + "╝")
         print()
 
 
-class AsciiColors:
-    HEADER = "\033[95m"
-    OKGREEN = "\033[92m"
-    WARNING = "\033[93m"
-    FAIL = "\033[91m"
-    ENDC = "\033[0m"
-
-
 def show_error(error, origin, msg, ):
-    print(f"{AsciiColors.FAIL}=================== ERROR ========================={AsciiColors.ENDC}")
+    print(f"{Fore.RED}=================== ERROR ========================={Fore.RESET}")
     print(f" [X] Location: {origin} --> error")
     print(f" [X] {error}")
     print(f" [X] {msg}")
-    print(f"{AsciiColors.FAIL}===================================================={AsciiColors.ENDC}")
+    print(f"{Fore.RED}===================================================={Fore.RESET}")
 
+
+def print_timestamp(msg=""):
+    output_msg = f"{msg} {time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())}"
+    print(f"╔════════════════════════════════════════════════════════════════════════════════╗")
+    print(f"║ %-78s ║"%(output_msg))
+    print(f"╚════════════════════════════════════════════════════════════════════════════════╝")
+    
 
 async def fetch(session, url):
     while True:
@@ -323,7 +351,10 @@ async def fetch(session, url):
                 break
 
             # poping a word from worldist 
-            path = f"{url}{config.wordlist.pop()}"
+            try:
+                path = f"{url}{next(config.wordlist)}"
+            except StopIteration:
+                break
 
         # local headers
         headers = {}            
@@ -332,6 +363,8 @@ async def fetch(session, url):
         
         request_start_time = asyncio.get_event_loop().time()
         async with session.get(path, headers=headers, proxy=config.proxy) as resp:
+
+            # checking that the response is not included in the hide_status_code filter
             if resp.status not in config.hide_status_code:
 
                 request_end_time = asyncio.get_event_loop().time()
@@ -344,28 +377,31 @@ async def fetch(session, url):
                 else:
                     status_color = Fore.YELLOW
 
-                # reading response 
+                # getting data from response
                 content = await resp.read()
                 content_length = len(content)
+                server =  resp.headers.get('Server', 'UNKNOWN')
                 
-                output_msg_1 =  f"{status_color}[StatusCode: {resp.status}]  "
-                output_msg_1 += f"{Fore.CYAN}[ContentLength: {content_length} b]  "
-                output_msg_1 += f"{Fore.BLUE}[ResponseTime: {response_time:.2f} ms]{Fore.LIGHTBLACK_EX}"
+                output_msg_1 =  f"{status_color}[SC: {resp.status}]  "
+                output_msg_1 += f"{Fore.CYAN}[CL: {content_length} b]  "
+                output_msg_1 += f"{Fore.CYAN}[SRV: {server}]  "
+                output_msg_1 += f"{Fore.BLUE}[RT: {response_time:.2f} ms]{Fore.LIGHTBLACK_EX}"
 
                 output_msg_2 = f"URL: {Fore.LIGHTMAGENTA_EX}{resp.url}{Fore.LIGHTBLACK_EX}"
 
-                print(f"{Fore.LIGHTBLACK_EX}╔══════════════════════════════════════════════════════════════════════════╗")
-                print(f"{Fore.LIGHTBLACK_EX}║ %-92s ║"%(output_msg_1))
-                print(f"{Fore.LIGHTBLACK_EX}║ %-82s ║"%(output_msg_2))
-                print(f"{Fore.LIGHTBLACK_EX}╚══════════════════════════════════════════════════════════════════════════╝")
+                print(f"{Fore.LIGHTBLACK_EX}╔════════════════════════════════════════════════════════════════════════════════╗")
+                print(f"{Fore.LIGHTBLACK_EX}║ %-103s ║"%(output_msg_1))
+                print(f"{Fore.LIGHTBLACK_EX}║ %-88s ║"%(output_msg_2))
+                print(f"{Fore.LIGHTBLACK_EX}╚════════════════════════════════════════════════════════════════════════════════╝")
 
-
-                #print("[SC: %-3s][CL: %-5s] -> [URL: %s]" % (resp.status, len(await resp.read()), resp.url))
-        
+        # increasing bar count by 1  
         config.bar()
 
 
 async def main():
+
+    # init colorama
+    init(autoreset=True)
 
     connector = aiohttp.TCPConnector(ssl=config.verify_cert)
     timeout   = aiohttp.ClientTimeout(total=config.timeout)
@@ -382,39 +418,56 @@ async def main():
         headers=headers        
     )
 
-    async with client_session as session:
-        tasks = [fetch(session, config.url) for _ in range(config.tasks)]
-        await asyncio.gather(*tasks)
+    # progress bar configuration
+    progress_bar = alive_bar(
+        config.wordlist_count, 
+        enrich_print=False,
+        title="Processing",
+        calibrate=200
+    )
+
+    print_timestamp("Starting at")
+    start_time = time.time()
+
+    with progress_bar as bar:
+        config.bar = bar
+        async with client_session as session:
+            tasks = [fetch(session, config.url) for _ in range(config.tasks)]
+            await asyncio.gather(*tasks)
+
+    end_time = time.time()
+    print_timestamp("Finishing at")
+
+    if config.debug:
+        real_time = end_time - start_time
+        user_time = time.process_time()
+        syst_time = real_time - user_time
+        print(f"Real: {real_time}")
+        print(f"User: {user_time}")
+        print(f"Sys:  {syst_time}")
 
     
 if __name__ == "__main__":
 
-    # init colorama
-    init(autoreset=True)
-    
-    # parsing arguments
+    # parsing arguments here to be accessible globally
     config = Config()
     config.show_config()
-    sleep(3)    
+    time.sleep(3)    
 
     try:
-        # progress bar configuration
-        progress_bar = alive_bar(
-            len(config.wordlist), 
-            enrich_print=False,
-            title="Processing"
-        )
-
-        with progress_bar as bar:
-            config.bar = bar
-            asyncio.run(main())
-
+        asyncio.run(main())
     except KeyboardInterrupt:
         print("\n[X] KeyBoard Interrupt...")
         print("[!] Finishing the program")
-
-
+    
+    
 # TODO:
+# - Finish input validations
+# - Improve redirection handling
+# - Improve error handling to handle errors instead of finishing program at the first error ocurrence.
+# - Implement asyncio.gather with return_exceptions=True to continue task execution in case on task fail.
+# - Implement concurrent connections controls. (number of concurrent connexions, timewaits, etc)
+# - Implement saving result functionality in json format.
 
 # FIXME:
 # - proxy utility is failing idk why. aiohttp.client_exceptions.ServerDisconnectedError: Server disconnected
