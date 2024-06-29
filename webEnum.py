@@ -6,6 +6,7 @@ import aiohttp
 import asyncio
 import argparse
 import time
+import json
 from inspect import currentframe
 from urllib.parse import urlparse
 from alive_progress import alive_bar
@@ -107,6 +108,9 @@ class Config:
 
         # dynamic user agent for random user generation
         self.dynamic_ua = UserAgent()
+
+        # this will contains all results that will saved to a file if specified.
+        self.results = list()
     
     def validate_url(self, url):
         """Validate and return the url.
@@ -346,14 +350,11 @@ def print_timestamp(msg=""):
 async def fetch(session, url):
     while True:
         async with config.lock:
-            # veryfing that there are words left to use
-            if not config.wordlist:
-                break
-
-            # poping a word from worldist 
             try:
+                # Yielding the next word of the wordlist generator
                 path = f"{url}{next(config.wordlist)}"
             except StopIteration:
+                # stop loop if there is no more words in the wordlist generator
                 break
 
         # local headers
@@ -394,9 +395,17 @@ async def fetch(session, url):
                 print(f"{Fore.LIGHTBLACK_EX}║ %-88s ║"%(output_msg_2))
                 print(f"{Fore.LIGHTBLACK_EX}╚════════════════════════════════════════════════════════════════════════════════╝")
 
-        # increasing bar count by 1  
-        config.bar()
+                async with config.lock:
+                    config.results.append({
+                        'url': str(resp.url),
+                        'status_code': resp.status,
+                        'content_length': content_length,
+                        'server': server,
+                        'response_time': response_time
+                    })
 
+        # increasing bar count by 1  
+        config.bar()    
 
 async def main():
 
@@ -442,9 +451,17 @@ async def main():
         real_time = end_time - start_time
         user_time = time.process_time()
         syst_time = real_time - user_time
+        print("===== DEBUGGING INFO =====")
         print(f"Real: {real_time}")
         print(f"User: {user_time}")
         print(f"Sys:  {syst_time}")
+        print(f"Results saved in {config.output}")
+
+    # saving results to a file if specified
+    if config.output:
+        async with config.lock:
+            with open(config.output, "w") as f:
+                json.dump(config.results, f, indent=4)
 
     
 if __name__ == "__main__":
@@ -468,6 +485,7 @@ if __name__ == "__main__":
 # - Implement asyncio.gather with return_exceptions=True to continue task execution in case on task fail.
 # - Implement concurrent connections controls. (number of concurrent connexions, timewaits, etc)
 # - Implement saving result functionality in json format.
+# - Implement boxes to put messages in automatically
 
 # FIXME:
 # - proxy utility is failing idk why. aiohttp.client_exceptions.ServerDisconnectedError: Server disconnected
