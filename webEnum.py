@@ -7,10 +7,11 @@ import asyncio
 import argparse
 import time
 import json
+from prettytable import PrettyTable
 from inspect import currentframe
 from urllib.parse import urlparse
 from alive_progress import alive_bar
-from colorama import Fore, init
+from colorama import Fore
 from fake_useragent import UserAgent
 
 
@@ -54,7 +55,6 @@ class Config:
         # Debugging arguments
         debug = parser.add_argument_group("debugging options")
         debug.add_argument("-v", "--verbose", action="store_true", help="Enable verbose mode.")
-        debug.add_argument("-d", "--debug", action="store_true", help="Enable debug mode.")
         debug.add_argument("-o", "--output", metavar="", type=str, help="Save output to a file.")
         debug.add_argument("-q", "--quiet", action="store_true", help="Supress banner and configuration printing.")
 
@@ -71,7 +71,7 @@ class Config:
         self.wordlist_path = self.validate_wordlist(args.wordlist)
         self.extensions    = self.validate_extensions(args.extensions) if args.extensions else None
         self.add_slash     = args.add_slash
-        self.http_method   = self.validate_http_method(args.http_method) if args.http_method else None
+        self.http_method   = args.http_method
         self.http_headers  = self.validate_http_headers(args.http_headers) if args.http_headers else None
         self.user_agent    = self.validate_user_agent(args.user_agent) if args.user_agent else None
         self.random_ua     = args.random_ua
@@ -90,7 +90,6 @@ class Config:
         self.retries  = args.retries
 
         self.verbose = args.verbose
-        self.debug   = args.debug
         self.output  = args.output
         self.quiet   = args.quiet 
 
@@ -201,10 +200,6 @@ class Config:
             exit(-1)
         
         return wordlist_path
-
-    def validate_http_method(self, method):
-        # no validations yet
-        return method
 
     def validate_http_headers(self, headers):
         """validate headers specified by user and return a dict containing the validated and parsed headers.
@@ -318,19 +313,17 @@ class Config:
             return sum(1 for line in f)
 
     def show_config(self):
-        print("╔" + "═"*80 + "╗")
-        print("║ %13s: %-64s║"%("URL", self.url))
-        print("║ %13s: %-64s║"%("WORDLIST", self.wordlist_path))
-        print("║ %13s: %-64s║"%("METHOD", self.http_method))
-        print("║ %13s: %-64s║"%("USER AGENT", self.user_agent))
-        print("║ %13s: %-64s║"%("RANDOM UA", self.random_ua))
-        print("║ %13s: %-64s║"%("EXTENSIONS", self.extensions))
-        print("║ %13s: %-64s║"%("TASKS", self.tasks))
-        print("║ %13s: %-64s║"%("TIMEOUT", self.timeout))
-        print("║ %13s: %-64s║"%("HIDE STATUS", self.hide_status_code))
-        print("╚" + "═"*80 + "╝")
-        print()
-
+        print("=" * 100)
+        print("[!] %13s: %-64s"%("URL", self.url))
+        print("[!] %13s: %-64s"%("WORDLIST", self.wordlist_path))
+        print("[!] %13s: %-64s"%("METHOD", self.http_method))
+        print("[!] %13s: %-64s"%("USER AGENT", self.user_agent))
+        print("[!] %13s: %-64s"%("RANDOM UA", self.random_ua))
+        print("[!] %13s: %-64s"%("EXTENSIONS", self.extensions))
+        print("[!] %13s: %-64s"%("TASKS", self.tasks))
+        print("[!] %13s: %-64s"%("TIMEOUT", self.timeout))
+        print("[!] %13s: %-64s"%("HIDE STATUS", self.hide_status_code))
+        print("=" * 100)
 
 def show_error(error, origin, msg, ):
     print(f"{Fore.RED}=================== ERROR ========================={Fore.RESET}")
@@ -342,12 +335,22 @@ def show_error(error, origin, msg, ):
 
 def print_timestamp(msg=""):
     output_msg = f"{msg} {time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())}"
-    print(f"╔════════════════════════════════════════════════════════════════════════════════╗")
-    print(f"║ %-78s ║"%(output_msg))
-    print(f"╚════════════════════════════════════════════════════════════════════════════════╝")
+    print("=" * 100)
+    print(f"%-78s "%(output_msg))
+    print("=" * 100)
     
-
+    
 async def fetch(session, url):
+    """
+    Make asynchronous HTTP requests to a URL provided as a parameter using an asynchronous session.
+
+    Args:
+        session (aiohttp.ClientSession): Asynchronous session used to make requests.
+        url (str): The base URL that will be enumerated.
+
+    Locks:
+        This function uses a lock (config.lock) to protect the access to the list that contains words and the list that contains the results.
+    """
     while True:
         async with config.lock:
             try:
@@ -369,48 +372,46 @@ async def fetch(session, url):
             if resp.status not in config.hide_status_code:
 
                 request_end_time = asyncio.get_event_loop().time()
-                response_time = request_end_time - request_start_time
+                response_time = f"{request_end_time - request_start_time:.2f}"
 
                 if resp.status in range(200, 300):
-                    status_color = Fore.GREEN
-                elif resp.status in range(400, 500):
-                    status_color = Fore.RED
+                    sc_color = Fore.GREEN
+                elif resp.status in range(300, 400):
+                    sc_color = Fore.BLUE
+                elif resp.status in range(400, 599):
+                    sc_color = Fore.RED
                 else:
-                    status_color = Fore.YELLOW
+                    sc_color = Fore.YELLOW
 
                 # getting data from response
                 content = await resp.read()
-                content_length = len(content)
+                content_length = str(len(content))
+                content_type = resp.headers.get("content-type", "UNKNOWN")
                 server =  resp.headers.get('Server', 'UNKNOWN')
+
+                print("".join([
+                    f"{Fore.CYAN}{urlparse(str(resp.url)).path:<30} ",
+                    f"{sc_color}[SC: {resp.status:<3}] ",
+                    f"{Fore.MAGENTA}[CL: {content_length:>5}] ",
+                    f"{Fore.BLUE}[RT: {response_time:>4}] ",
+                    f"{Fore.WHITE}[SRV: {server:>15}] ",
+                    f"{Fore.GREEN}{content_type}{Fore.RESET} "
+                ]))
                 
-                output_msg_1 =  f"{status_color}[SC: {resp.status}]  "
-                output_msg_1 += f"{Fore.CYAN}[CL: {content_length} b]  "
-                output_msg_1 += f"{Fore.CYAN}[SRV: {server}]  "
-                output_msg_1 += f"{Fore.BLUE}[RT: {response_time:.2f} ms]{Fore.LIGHTBLACK_EX}"
-
-                output_msg_2 = f"URL: {Fore.LIGHTMAGENTA_EX}{resp.url}{Fore.LIGHTBLACK_EX}"
-
-                print(f"{Fore.LIGHTBLACK_EX}╔════════════════════════════════════════════════════════════════════════════════╗")
-                print(f"{Fore.LIGHTBLACK_EX}║ %-103s ║"%(output_msg_1))
-                print(f"{Fore.LIGHTBLACK_EX}║ %-88s ║"%(output_msg_2))
-                print(f"{Fore.LIGHTBLACK_EX}╚════════════════════════════════════════════════════════════════════════════════╝")
-
                 async with config.lock:
-                    config.results.append({
-                        'url': str(resp.url),
-                        'status_code': resp.status,
-                        'content_length': content_length,
-                        'server': server,
-                        'response_time': response_time
-                    })
+                    config.table.add_row([
+                        resp.url, 
+                        resp.status, 
+                        content_length, 
+                        response_time, 
+                        server, 
+                        content_type
+                    ])
 
         # increasing bar count by 1  
         config.bar()    
 
 async def main():
-
-    # init colorama
-    init(autoreset=True)
 
     connector = aiohttp.TCPConnector(ssl=config.verify_cert)
     timeout   = aiohttp.ClientTimeout(total=config.timeout)
@@ -438,34 +439,36 @@ async def main():
     print_timestamp("Starting at")
     start_time = time.time()
 
+    config.table = PrettyTable()
+    config.table.field_names = ["URL", "STATUS CODE", "CONTENT-LENGTH", "RESPONSE TIME", "SERVER", "CONTENT-TYPE"]
+    config.table.align = "l"
+
     with progress_bar as bar:
         config.bar = bar
         async with client_session as session:
             tasks = [fetch(session, config.url) for _ in range(config.tasks)]
             await asyncio.gather(*tasks)
 
+
     end_time = time.time()
     print_timestamp("Finishing at")
 
-    if config.debug:
-        real_time = end_time - start_time
-        user_time = time.process_time()
-        syst_time = real_time - user_time
-        print("===== DEBUGGING INFO =====")
-        print(f"Real: {real_time}")
-        print(f"User: {user_time}")
-        print(f"Sys:  {syst_time}")
-        print(f"Results saved in {config.output}")
+    real_time = end_time - start_time
+    user_time = time.process_time()
+    syst_time = real_time - user_time
+    
+    print(f"\nReal: {real_time:.2f}")
+    print(f"User: {user_time:.2f}")
+    print(f"Sys:  {syst_time:.2f}")
 
     # saving results to a file if specified
     if config.output:
         async with config.lock:
             with open(config.output, "w") as f:
-                json.dump(config.results, f, indent=4)
+                f.write(config.table.get_formatted_string("html"))
 
     
 if __name__ == "__main__":
-
     # parsing arguments here to be accessible globally
     config = Config()
     config.show_config()
@@ -483,9 +486,11 @@ if __name__ == "__main__":
 # - Improve redirection handling
 # - Improve error handling to handle errors instead of finishing program at the first error ocurrence.
 # - Implement asyncio.gather with return_exceptions=True to continue task execution in case on task fail.
-# - Implement concurrent connections controls. (number of concurrent connexions, timewaits, etc)
+# - Implement concurrent connections controls. (number of concurrent connexions, timewaits, etc).
 # - Implement saving result functionality in json format.
-# - Implement boxes to put messages in automatically
+# - Implement boxes to put messages in automatically.
+# - Implement custom message for every HTTP STATUS CODE.
+# - Implement a dynamic table formatting.
 
 # FIXME:
 # - proxy utility is failing idk why. aiohttp.client_exceptions.ServerDisconnectedError: Server disconnected
