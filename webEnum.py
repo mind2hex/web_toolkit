@@ -6,7 +6,7 @@ import aiohttp
 import asyncio
 import argparse
 import time
-import json
+import re
 from prettytable import PrettyTable
 from inspect import currentframe
 from urllib.parse import urlparse
@@ -94,23 +94,27 @@ class Config:
         self.quiet   = args.quiet 
 
         self.hide_status_code    = [404, 503] if args.hide_status_code is None else self.validate_status_codes(args.hide_status_code.split(","))
+        self.hide_regex          = "" if args.hide_regex is None else args.hide_regex
         #self.hide_content_length = [] if args.hide_content_length is None else self.validate_content_length(args.hide_content_length.split(","))
         #self.hide_web_server     = [] if args.hide_web_server is None else self.validate_web_server(args.hide_web_server.split(","))
-        #self.hide_regex          = args.hide_regex
+        
 
         # create wordlist generator to yield words instead of loading all words to memory
         self.wordlist       = self.wordlist_generator(self.wordlist_path, self.extensions, self.add_slash)
         self.wordlist_count = self.count_lines(self.wordlist_path)
+        self.wordlist_count = self.wordlist_count + (self.wordlist_count * len(self.extensions))
 
         # asynchronous lock to avoid every task accessing the same resource at the same time
         self.lock     = asyncio.Lock()
 
         # dynamic user agent for random user generation
         self.dynamic_ua = UserAgent()
+        
+        # This table will contain all the results from the web enumeration
+        self.table = PrettyTable()
+        self.table.field_names = ["URL", "STATUS CODE", "CONTENT-LENGTH", "RESPONSE TIME", "SERVER", "CONTENT-TYPE"]
+        self.table.align = "l"
 
-        # this will contains all results that will saved to a file if specified.
-        self.results = list()
-    
     def validate_url(self, url):
         """Validate and return the url.
 
@@ -332,14 +336,12 @@ def show_error(error, origin, msg, ):
     print(f" [X] {msg}")
     print(f"{Fore.RED}===================================================={Fore.RESET}")
 
-
 def print_timestamp(msg=""):
     output_msg = f"{msg} {time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())}"
     print("=" * 100)
     print(f"%-78s "%(output_msg))
     print("=" * 100)
-    
-    
+     
 async def fetch(session, url):
     """
     Make asynchronous HTTP requests to a URL provided as a parameter using an asynchronous session.
@@ -385,28 +387,31 @@ async def fetch(session, url):
 
                 # getting data from response
                 content = await resp.read()
-                content_length = str(len(content))
-                content_type = resp.headers.get("content-type", "UNKNOWN")
-                server =  resp.headers.get('Server', 'UNKNOWN')
 
-                print("".join([
-                    f"{Fore.CYAN}{urlparse(str(resp.url)).path:<30} ",
-                    f"{sc_color}[SC: {resp.status:<3}] ",
-                    f"{Fore.MAGENTA}[CL: {content_length:>5}] ",
-                    f"{Fore.BLUE}[RT: {response_time:>4}] ",
-                    f"{Fore.WHITE}[SRV: {server:>15}] ",
-                    f"{Fore.GREEN}{content_type}{Fore.RESET} "
-                ]))
-                
-                async with config.lock:
-                    config.table.add_row([
-                        resp.url, 
-                        resp.status, 
-                        content_length, 
-                        response_time, 
-                        server, 
-                        content_type
-                    ])
+                # checking that the response doesnt match with the hide_regex filter
+                if config.hide_regex is not None and re.findall(config.hide_regex, content.decode()):
+                    content_length = str(len(content))
+                    content_type = resp.headers.get("content-type", "UNKNOWN")
+                    server =  resp.headers.get('Server', 'UNKNOWN')
+
+                    print("".join([
+                        f"{Fore.CYAN}{urlparse(str(resp.url)).path:<50} ",
+                        f"{sc_color}[SC: {resp.status:<3}] ",
+                        f"{Fore.MAGENTA}[CL: {content_length:>5}] ",
+                        f"{Fore.BLUE}[RT: {response_time:>4}] ",
+                        f"{Fore.WHITE}[SRV: {server:>10}] ",
+                        f"{Fore.GREEN}{content_type}{Fore.RESET} "
+                    ]))
+                    
+                    async with config.lock:
+                        config.table.add_row([
+                            resp.url, 
+                            resp.status, 
+                            content_length, 
+                            response_time, 
+                            server, 
+                            content_type
+                        ])
 
         # increasing bar count by 1  
         config.bar()    
@@ -439,9 +444,6 @@ async def main():
     print_timestamp("Starting at")
     start_time = time.time()
 
-    config.table = PrettyTable()
-    config.table.field_names = ["URL", "STATUS CODE", "CONTENT-LENGTH", "RESPONSE TIME", "SERVER", "CONTENT-TYPE"]
-    config.table.align = "l"
 
     with progress_bar as bar:
         config.bar = bar
@@ -494,3 +496,4 @@ if __name__ == "__main__":
 
 # FIXME:
 # - proxy utility is failing idk why. aiohttp.client_exceptions.ServerDisconnectedError: Server disconnected
+# - sometimes, when decoding the response content to find matches with re, a decode error may raise
