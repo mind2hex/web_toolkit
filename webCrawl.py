@@ -7,10 +7,8 @@ import time
 import re
 import os
 from bs4 import BeautifulSoup
-from inspect import currentframe
 from urllib.parse import urlparse, urljoin
 from colorama import Fore
-from fake_useragent import UserAgent
 from alive_progress import alive_it
 
 
@@ -27,22 +25,15 @@ class Config:
         )
         
         # General arguments
-        parser.add_argument("-u", "--url", metavar="", required=True, help="Target url.",)
+        parser.add_argument("-u", "--url", metavar="", type=self.url_type, required=True, help="Target url.",)
         parser.add_argument("-d", "--depth", metavar="", type=int, default=3, help="Depth to search for links",)
-        parser.add_argument("-D", "--download", metavar="", help="Specify extension of files to download or specify ALL. Ex: pdf,txt,jpg",)
         parser.add_argument("-N", "--netloc", action="store_true", help="Discard links with different netloc that the target url.",)
-        parser.add_argument("-CN", "--custom-netloc", metavar="", help="Specify a custom netloc. Different netlocs will be discarted.")
-        parser.add_argument("-m", "--http-method", metavar="", choices=["GET", "HEAD", "POST"], default="GET", help="HTTP method to use.")
-        parser.add_argument("-H", "--http-headers", metavar="", help="Set custom HTTP headers. Ex: Header1=Value1,Header2=Value2")
-        parser.add_argument("-a", "--user-agent", metavar="", default="yoMamma", help="User-Agent to use in the HTTP request")
-        parser.add_argument("-r", "--random-ua", action="store_true", help="Randomize user agent.")
-        parser.add_argument("-c", "--cookies", metavar="", help="Cookies to use in the HTTP request. Ex: Cookie1=Value1,Cookie2=Value2")
-        parser.add_argument("-b", "--body-data", metavar="", help="Body data to use in the HTTP POST request.")
-        parser.add_argument("-p", "--proxy", metavar="", help="Proxy to use. Ex: http;http://localhost:8080")
-        parser.add_argument("-j", "--json", action="store_true", help="Use json formatted data in the HTTP POST request. ")
-        parser.add_argument("-f", "--follow", action="store_true", default=False, help="Follow HTTP redirections")
-        parser.add_argument("-i", "--ignore-errors", action="store_true", help="Ignore script errors.")
-        parser.add_argument("--usage", action="store_true", help="Print usage message")
+        parser.add_argument("-CN", "--custom-netloc", metavar="", type=self.regex_type, help="Specify a custom netloc. Different netlocs will be discarted.")
+        parser.add_argument("-x", "--extensions", metavar="", type=self.extensions_type, help="Specify extension of files to download. Ex: pdf,txt,jpg",)
+        parser.add_argument("-H", "--http-headers", metavar="", type=self.key_value_pairs_type, help="Set custom HTTP headers. Ex: Header1=Value1,Header2=Value2")
+        parser.add_argument("-a", "--user-agent", metavar="", default="webCrawl", help="User-Agent to use in the HTTP request")
+        parser.add_argument("-c", "--cookies", metavar="", type=self.key_value_pairs_type, help="Cookies to use in the HTTP request. Ex: Cookie1=Value1,Cookie2=Value2")
+        parser.add_argument("-p", "--proxy", metavar="", type=self.url_type, help="Proxy to use. Ex: http;http://localhost:8080")
         parser.add_argument("-V", "--verify-cert", action="store_true", help="Verify SSL certificates. Default -> False")
 
         # Performance arguments
@@ -53,198 +44,81 @@ class Config:
 
         # Debugging arguments
         debug = parser.add_argument_group("debugging options")
-        debug.add_argument("-v", "--verbose", action="store_true", help="Enable verbose mode.")
         debug.add_argument("-o", "--output", metavar="", type=str, help="Save output to a file.")
         debug.add_argument("-q", "--quiet", action="store_true", help="Supress banner and configuration printing.")
 
         args = parser.parse_args()
 
-        self.url           = self.validate_url(args.url)
+        self.url           = args.url
         self.depth         = args.depth
         self.netloc        = args.netloc
         self.custom_netloc = args.custom_netloc
-        self.download      = self.validate_extensions(args.download) if args.download else None
-        self.http_method   = args.http_method
-        self.http_headers  = self.validate_http_headers(args.http_headers) if args.http_headers else None
-        self.user_agent    = self.validate_user_agent(args.user_agent) if args.user_agent else None
-        self.random_ua     = args.random_ua
-        self.cookies       = self.validate_cookies(args.cookies) if args.cookies else None
-        self.body_data     = args.body_data
-        self.proxy         = self.validate_url(args.proxy) if args.proxy else None
-        self.json          = args.json
-        self.follow        = args.follow
-        self.ignore_errors = args.ignore_errors
-        self.usage         = args.usage
+        self.extensions    = args.extensions
+        self.http_headers  = args.http_headers
+        self.user_agent    = args.user_agent
+        self.cookies       = args.cookies
+        self.proxy         = args.proxy
         self.verify_cert   = args.verify_cert
 
-        self.tasks    = args.tasks
+        self.tasks           = args.tasks
         self.connect_timeout = args.connect_timeout
         self.read_timeout    = args.read_timeout
 
-        self.verbose = args.verbose
         self.output  = args.output
         self.quiet   = args.quiet 
 
         # asynchronous lock to avoid every task accessing the same resource at the same time
         self.lock     = asyncio.Lock()
 
-        # dynamic user agent for random user generation
-        self.dynamic_ua = UserAgent()
-
         # this will contains all results that will saved to a file if specified.
         self.visited_urls = set()
-    
-    def validate_url(self, url):
-        """Validate and return the url.
 
-        This function do the following:
-        - Check that the url contain the scheme and netloc
+    def url_type(self, url):
+        parsed_url = urlparse(url)
+        if not all([parsed_url.scheme, parsed_url.netloc]):
+            raise argparse.ArgumentTypeError(f"'{url}' is not a valid url.")
+        
+        return parsed_url
 
-        Args:
-            url (str): URL to validate.
-
-        Returns:
-            str: Parsed URL into <scheme>://<netloc>/<path>
-        """
+    def regex_type(self, regex):
         try:
-            result = urlparse(url)
+            re.compile(regex)
+            return regex
+        except re.error as e:
+            raise argparse.ArgumentTypeError(f"'{regex}' is not a valid regular expression.")
 
-            if not all([result.scheme, result.netloc]):
-                raise ValueError
-        except:
-            show_error(
-                f"Invalid URL --> {url}",
-                f"function::{currentframe().f_code.co_name}",
-                "try using a correct url format like http://google.com/",
-            )
-            exit(-1)
-        result = f"{result.scheme}://{result.netloc}{result.path}"
-        return result
+    def extensions_type(self, extensions:str) -> list:
+        separated_extensions = extensions.split(",")
 
-    def validate_extensions(self, raw_extensions: str) -> list:
-        """validate extensions following the format "php,js,txt" and 
-        returns a list containing the extensions comma separated    
+        if not all(extensions):
+            raise argparse.ArgumentTypeError(f"'{extensions}' invalid extensions format, use 'ext1,ext2,ext3'.")
+        
+        return separated_extensions
 
-        Args:
-            raw_extensions (str): the extensions supposed to follow the format "php,js,txt..."
-
-        Returns:
-            list: list containing the comma separated extensions.
-        """
-
-        extensions = raw_extensions.split(',')
-
-        if len(extensions) == 0:
-            show_error(
-                "",
-                f"function::{currentframe().f_code.co_name}",
-                "Invalid extensions provided. Use -x php,txt,js,..."
-            )
-            exit(-1)
-
-        for ext in extensions:
-            if not ext.isalnum():
-                show_error(
-                    "",
-                    f"function::{currentframe().f_code.co_name}",
-                    "Invalid extensions provided. Use -x php,txt,js,..."
-                )
-                exit(-1)
-
-        return extensions
-
-    def validate_http_headers(self, headers):
-        """validate headers specified by user and return a dict containing the validated and parsed headers.
-
-        Args:
-            headers (str): string containing the headers specified by the user with the format key1=value1,key2=value2...
-
-        Returns:
-            dict: dictionary containing headers. Headers = {KEY1:VALUE1}
-        """
-
-        result = dict()
+    def key_value_pairs_type(self, value) -> list:
+        pairs_dict = {}
         try:
-            separated_headers = headers.split(",")
-            for header in separated_headers:
-                parts = header.split("=")
-
-                # validating that the header contains a Key and value.
-                if len(parts) != 2:
-                    raise ValueError(f"Invalid http header format: {header}")
-                
-                key, value = parts[0].strip(), parts[1].strip()
-                if not key or not value:
-                    raise ValueError(f"Key or value of the header is empty: {header}")
-                
-                result[key] = value
-                
-        except Exception as e:
-            show_error(
-                str(e),
-                f"function::{currentframe().f_code.co_name}",
-                "invalid headers specified. Use -H Key1=Value1,Key2=Value...",
-            )
-            exit(-1)
-
-        return result
-
-    def validate_user_agent(self, user_agent):
-        # no validations yet
-        return user_agent
-
-    def validate_status_codes(self, status_codes: list) -> list:
-        """validate_status_codes check that the specified status code are in a correct format.
-
-        This function checks:
-            - the status code is a 3 digits number.
-            - the status code is a integer.
-
-        Args:
-            status_codes (list): the list containing the status codes.
-
-        Raises:
-            ValueError: If the value of a status code is invalid.
-
-        Returns:
-            list: The list containing the status code to hide from the output.
-        """
-        result = list()
-        try:        
-            for sc in status_codes:
-                if len(sc) != 3:
+            pairs = value.split(',')
+            for pair in pairs:
+                key, val = pair.split('=')
+                key = key.strip()
+                val = val.strip()
+                if not key or not val:
                     raise ValueError
-                
-                result.append(int(sc))
-        except Exception as e:
-            show_error(
-                str(e),
-                f"function::{currentframe().f_code.co_name}",
-                "invalid status code filter specified. Use -hsc 400,401,500 "
-            )
-            exit(1)
-
-        return result        
+                pairs_dict[key] = val
+        except ValueError:
+            raise argparse.ArgumentTypeError(f"'{value}' is not a valid key-value format. Use Key1=Value1,key2=value2...")
+        
+        return pairs_dict     
 
     def show_config(self):
+        exclude = ["visited_urls", "lock",]
         print("=" * 100)
-        print("[!] %13s: %-64s"%("URL", self.url))
-        print("[!] %13s: %-64s"%("METHOD", self.http_method))
-        print("[!] %13s: %-64s"%("USER AGENT", self.user_agent))
-        print("[!] %13s: %-64s"%("RANDOM UA", self.random_ua))
-        print("[!] %13s: %-64s"%("EXTENSIONS", self.extensions))
-        print("[!] %13s: %-64s"%("TASKS", self.tasks))
-        print("[!] %13s: %-64s"%("TIMEOUT", self.timeout))
-        print("[!] %13s: %-64s"%("HIDE STATUS", self.hide_status_code))
+        for attr, value in self.__dict__.items():
+            if not attr.startswith("_") and attr not in exclude and value is not None:
+                print("[!] %13s: %-64s"%(attr, value))
+
         print("=" * 100)
-
-
-def show_error(error, origin, msg, ):
-    print(f"{Fore.RED}=================== ERROR ========================={Fore.RESET}")
-    print(f" [X] Location: {origin} --> error")
-    print(f" [X] {error}")
-    print(f" [X] {msg}")
-    print(f"{Fore.RED}===================================================={Fore.RESET}")
 
 
 def print_timestamp(msg=""):
@@ -285,10 +159,15 @@ def print_hierarchy(hierarchy, prefix=''):
 
 
 async def fetch_links(session, url, semaphore):
+    # global headers to use in all sessions
+    headers = {
+        "User-Agent": config.user_agent 
+    }
+
     async with semaphore:
         links = set()
         # reading response content from the HTTP REQUEST 
-        async with session.get(url) as resp:
+        async with session.get(url, headers=headers) as resp:
             timeout = False
             if resp.status == 200:
                 try:
@@ -319,11 +198,11 @@ async def fetch_links(session, url, semaphore):
                                 links.add(parsed_link.geturl())
             
         # saving content to LOOT folder if the file extension match the user specified file extension
-        if config.download and not timeout:
+        if config.extensions and not timeout:
             if not os.path.exists("./LOOT"):
                 os.mkdir("./LOOT")
             
-            if urlparse(url).path.split(".")[-1] in config.download:
+            if urlparse(url).path.split(".")[-1] in config.extensions:
                 filename = urlparse(url).path.split("/")[-1]
                 if not os.path.exists(f"./LOOT/{filename}"):
                     async with config.lock:
@@ -341,7 +220,7 @@ def filter_links(links):
             continue
 
         # discard all links obtained with different netloc if specified by user.
-        if config.netloc and urlparse(config.url).netloc != urlparse(link).netloc:
+        if config.netloc and config.url.netloc != urlparse(link).netloc:
             continue
         
         # discard all netlocs different from the netloc specified by the user.
@@ -366,22 +245,16 @@ async def main():
         sock_read=config.read_timeout
     )
 
-    # global headers to use in all sessions
-    headers = {
-        "User-Agent": config.user_agent 
-    }
-
     # client session configuration
     client_session =  aiohttp.ClientSession(
         timeout=timeout, 
         connector=connector,
-        headers=headers        
     )
 
     try:
         async with client_session as session:
             semaphore = asyncio.Semaphore(config.tasks)  # limiting concurrency
-            links = [config.url]
+            links = [config.url.geturl()]
 
             # alive progress bar initialization
             bar = alive_it(range(config.depth))  
@@ -400,8 +273,7 @@ async def main():
     except KeyboardInterrupt:
         print("Program Finished by user...")
 
-    except Exception as e:
-        print(f"Unknown error {e}")
+    
 
     hierarchy = build_hierarchy(list(config.visited_urls))
     print_hierarchy(hierarchy)
@@ -409,12 +281,12 @@ async def main():
 
 if __name__ == "__main__":
     config = Config()
+    config.show_config()
     asyncio.run(main())
 
 
 
 # TODO:
-# - Implement validation to config.custom_netloc because some user may input an invalid regex.
 # - Improve progress bar to show how many urls left to scan instead of showing progress of LEVELS
 # - Add new visited URLs in fetch_urls functions instead
 # - In the tree listing, add the url at the end of every entry.
