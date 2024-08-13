@@ -1,6 +1,7 @@
 #!/usr/bin/python3
 
 import aiohttp
+import aiohttp.client_exceptions
 import asyncio
 import argparse
 import time
@@ -10,6 +11,8 @@ from bs4 import BeautifulSoup
 from urllib.parse import urlparse, urljoin
 from colorama import Fore
 from alive_progress import alive_it
+from collections import defaultdict
+
 
 
 class Config:
@@ -26,7 +29,7 @@ class Config:
         
         # General arguments
         parser.add_argument("-u", "--url", metavar="", type=self.url_type, required=True, help="Target url.",)
-        parser.add_argument("-d", "--depth", metavar="", type=int, default=3, help="Depth to search for links",)
+        parser.add_argument("-D", "--depth", metavar="", type=int, default=3, help="Depth to search for links",)
         parser.add_argument("-N", "--netloc", action="store_true", help="Discard links with different netloc that the target url.",)
         parser.add_argument("-CN", "--custom-netloc", metavar="", type=self.regex_type, help="Specify a custom netloc. Different netlocs will be discarted.")
         parser.add_argument("-x", "--extensions", metavar="", type=self.extensions_type, help="Specify extension of files to download. Ex: pdf,txt,jpg",)
@@ -128,89 +131,107 @@ def print_timestamp(msg=""):
     print("=" * 100)
 
 
-def add_to_hierarchy(hierarchy, parts):
-    current_level = hierarchy
-    for part in parts:
-        if part not in current_level:
-            current_level[part] = {}
-        current_level = current_level[part]
+def add_to_tree(tree, parts, url):
+    if not parts:
+        return
+    part = parts.pop(0)
+    
+    if part not in tree:
+        tree[part] = (defaultdict(dict), '')
+
+    if parts:
+        add_to_tree(tree[part][0], parts, url)
+    else:
+        tree[part] = (tree[part][0], url)
 
 
-def build_hierarchy(urls):
-    hierarchy = {}
+def build_tree(urls):
+    tree = defaultdict(lambda: (defaultdict(dict), ''))
     for url in urls:
         parsed_url = urlparse(url)
-        path_parts = parsed_url.path.strip("/").split("/")
-        full_parts = [parsed_url.netloc] + path_parts  # Asume que el dominio es parte de la jerarquía
-        add_to_hierarchy(hierarchy, full_parts)
-    return hierarchy
+        domain = parsed_url.netloc
+        path_parts = [part for part in parsed_url.path.split('/') if part]
+        add_to_tree(tree[domain][0], path_parts, url)
+    return tree
 
 
-def print_hierarchy(hierarchy, prefix=''):
-    items = list(hierarchy.items())
-    for i, (key, sub_hierarchy) in enumerate(items):
-        connector = '└── ' if i == len(items) - 1 else '├── '
-        if sub_hierarchy:  # Si tiene subdirectorios, continua recursivamente
-            new_prefix = prefix + ('    ' if connector.startswith('└') else '│   ')
-            print(f"{prefix}{connector}{key}")
-            print_hierarchy(sub_hierarchy, new_prefix)
-        else:  # Si es un elemento final (sin subdirectorios)
-            print(f"{prefix}{connector}{key}")
+def print_tree(tree, prefix='', is_last=True):
+    pointers = ['├── ', '└── ']
+    for i, (key, (subtree, full_url)) in enumerate(tree.items()):
+        pointer = pointers[i == len(tree) - 1]
+        print(f"{prefix}{pointer}{key} {Fore.GREEN}{full_url if full_url else ''}{Fore.RESET}")
+        if subtree:
+            new_prefix = prefix + ("    " if i == len(tree) - 1 else "│   ")
+            print_tree(subtree, new_prefix, i == len(tree) - 1)
+
+
+def show_urls_as_tree(urls):
+    tree = build_tree(urls)
+    print_tree(tree)
 
 
 async def fetch_links(session, url, semaphore):
-    # global headers to use in all sessions
     headers = {
         "User-Agent": config.user_agent 
     }
 
+    url_extension = urlparse(url).path.split(".")[-1]
     async with semaphore:
         links = set()
-        # reading response content from the HTTP REQUEST 
-        async with session.get(url, headers=headers) as resp:
-            timeout = False
-            if resp.status == 200:
-                try:
-                    response_headers = resp.headers
-                    content = await resp.read()
-                except TimeoutError:
-                    timeout = True
+        try:
+            # Trying get request
+            async with session.get(url, headers=headers) as resp:
+                if resp.status == 200:
+                    content_type = resp.headers.get("Content-Type")
 
-                # PARSING HTML DOCUMENTS
-                if response_headers.get("Content-Type", "UNKNOWN").startswith("text/html") and not timeout:
-                    soup = BeautifulSoup(content, 'html.parser')
-                    possible_sources = [
-                        'a', 'link', 'img', 
-                        'script', 'iframe', 'embed', 
-                        'object', 'source', 'video', 
-                        'audio', 'track', 'area', 
-                        'base', 'meta'
-                    ]
-                    
-                    for tag in soup.find_all(possible_sources):
-                        href = tag.get("href") or tag.get("src") or tag.get("content") or tag.get("srcset") or tag.get("data")
-                        if href:
-                            full_url = urljoin(url, href)
-                            parsed_link = urlparse(full_url)
+                    # reading response content only when it is a html document or if the user specified to download the file
+                    if content_type.startswith("text/html") or url_extension in config.extensions:
+                        try:
+                            content = await resp.read()
+                        except asyncio.TimeoutError:
+                            print(f"Timeout while reading content from {url}")
+                            return []
 
-                            # validating that new_link contains scheme and netloc
-                            if parsed_link.netloc and parsed_link.scheme:
-                                links.add(parsed_link.geturl())
-            
-        # saving content to LOOT folder if the file extension match the user specified file extension
-        if config.extensions and not timeout:
-            if not os.path.exists("./LOOT"):
-                os.mkdir("./LOOT")
-            
-            if urlparse(url).path.split(".")[-1] in config.extensions:
+                    # parsing HTML document
+                    if content_type.startswith("text/html"):
+                        soup = BeautifulSoup(content, 'html.parser')
+                        possible_sources = [
+                            'a', 'link', 'img', 'script', 'iframe', 'embed', 
+                            'object', 'source', 'video',  'audio', 'track', 
+                            'area', 'base', 'meta'
+                        ]
+
+                        for tag in soup.find_all(possible_sources):
+                            href = tag.get("href") or tag.get("src") or tag.get("content") or tag.get("srcset") or tag.get("data")
+                            if href:
+                                full_url = urljoin(url, href)
+                                parsed_link = urlparse(full_url)
+
+                                # validating the obtained url
+                                if parsed_link.netloc and parsed_link.scheme:
+                                    links.add(parsed_link.geturl())
+
+            # saving content of the request inside LOOT directory if the extension of url match one of the config.extensions
+            if url_extension in config.extensions:
+                if not os.path.exists("./LOOT"):
+                    os.mkdir("./LOOT")
+
                 filename = urlparse(url).path.split("/")[-1]
                 if not os.path.exists(f"./LOOT/{filename}"):
                     async with config.lock:
                         with open(f"./LOOT/{filename}", "wb") as file:
                             file.write(content)
 
+        except aiohttp.ClientConnectionError as e:
+            print(f"Connection error occurred for {url}: {str(e)}")
+        except aiohttp.ClientError as e:
+            print(f"HTTP request failed for {url}: {str(e)}")
+        except asyncio.TimeoutError:
+            print(f"Asyncio timeout error for {url}")
+
+
         return list(links)
-    
+
 
 def filter_links(links):
     results = list()
@@ -271,25 +292,33 @@ async def main():
                 bar.text  = f"URLs COLLECTED: {len(config.visited_urls)}"
 
     except KeyboardInterrupt:
-        print("Program Finished by user...")
+        print("[!] Program Finished by user...")
+        print("[!] Finishing tasks.")
+        tasks = asyncio.all_tasks()
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        print("[!] Tasks finished.")
 
-    
-
-    hierarchy = build_hierarchy(list(config.visited_urls))
-    print_hierarchy(hierarchy)
+    finally:
+        await client_session.close()
+        show_urls_as_tree(list(config.visited_urls))
 
 
 if __name__ == "__main__":
     config = Config()
     config.show_config()
-    asyncio.run(main())
-
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("[!] Program terminated by user.")
 
 
 # TODO:
 # - Improve progress bar to show how many urls left to scan instead of showing progress of LEVELS
 # - Add new visited URLs in fetch_urls functions instead
-# - In the tree listing, add the url at the end of every entry.
+# - Implement more parsers to beautiful soup... Right now the only parser based in the content-type is the html.
+# - Implement retries for every connection.
 
 # FIXME:
 # - Sometimes a simple connection timeout can make the program end. Fix this to be more reliable.
