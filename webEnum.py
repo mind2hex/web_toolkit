@@ -206,7 +206,7 @@ class Config:
 
         return wordlist_path
 
-    def wordlist_generator(self, wordlist_path, extensions=None, add_slash=False):
+    async def wordlist_generator(self, wordlist_path, extensions=None, add_slash=False):
         """generate a wordlist to yield words.
 
         Args:
@@ -217,7 +217,20 @@ class Config:
         Yields:
             str: The next word iteration in the wordlist.
         """        
+        async with aiofiles.open(wordlist_path, 'r') as wordlist_file:
+            async for word in wordlist_file:
+                word = word.strip()
+                if word:
+                    yield word
 
+                    if extensions:
+                        for ext in extensions:
+                            yield f"{word}.{ext}"
+
+                    if add_slash and not word.endswith("/"):
+                        yield f"{word}/"
+
+        """
         wordlist_file = open(wordlist_path, 'r') 
 
         for word in wordlist_file.readlines():
@@ -231,6 +244,7 @@ class Config:
 
                 if add_slash and not word.endswith("/"):
                     yield f"{word}/"
+        """
 
     def count_lines(self, wordlist_path:str) -> int:
         """count the lines of a file.
@@ -306,7 +320,7 @@ async def fetch(session, url):
         async with config.lock:
             try:
                 # Yielding the next word of the wordlist generator
-                path = f"{url}{next(config.wordlist)}"
+                path = f"{url}{await anext(config.wordlist)}"
             except StopIteration:
                 # stop loop if there is no more words in the wordlist generator
                 break
@@ -407,7 +421,7 @@ async def main():
         async with client_session as session:
             tasks = [fetch(session, config.url.geturl()) for _ in range(config.tasks)]
             
-            await asyncio.gather(*tasks)
+            await asyncio.gather(*tasks, return_exceptions=True)
 
 
     end_time = time.time()
@@ -447,7 +461,6 @@ if __name__ == "__main__":
 # - Implement asyncio.gather with return_exceptions=True to continue task execution in case on task fail.
 # - Implement concurrent connections controls. (number of concurrent connexions, timewaits, etc).
 # - Implement saving result functionality in json format.
-# - Implement boxes to put messages in automatically.
 # - Implement custom message for every HTTP STATUS CODE.
 # - Implement a dynamic table formatting.
 
