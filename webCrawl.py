@@ -1,5 +1,6 @@
 #!/usr/bin/python3
 
+
 import aiohttp
 import aiohttp.client_exceptions
 import asyncio
@@ -12,7 +13,7 @@ from urllib.parse import urlparse, urljoin
 from colorama import Fore
 from alive_progress import alive_it
 from collections import defaultdict
-
+from fake_useragent import UserAgent
 
 
 class Config:
@@ -30,12 +31,15 @@ class Config:
         # General arguments
         parser.add_argument("-u", "--url", metavar="", type=self.url_type, required=True, help="Target url.",)
         parser.add_argument("-D", "--depth", metavar="", type=int, default=3, help="Depth to search for links",)
+        parser.add_argument("-m", "--http-method", metavar="", choices=["GET", "POST"], default="GET", help="HTTP method to use.")
         parser.add_argument("-N", "--netloc", action="store_true", help="Discard links with different netloc that the target url.",)
         parser.add_argument("-CN", "--custom-netloc", metavar="", type=self.regex_type, help="Specify a custom netloc. Different netlocs will be discarted.")
-        parser.add_argument("-x", "--extensions", metavar="", type=self.extensions_type, help="Specify extension of files to download. Ex: pdf,txt,jpg",)
-        parser.add_argument("-H", "--http-headers", metavar="", type=self.key_value_pairs_type, help="Set custom HTTP headers. Ex: Header1=Value1,Header2=Value2")
-        parser.add_argument("-a", "--user-agent", metavar="", default="webCrawl", help="User-Agent to use in the HTTP request")
+        parser.add_argument("-x", "--extensions", metavar="", default=[], type=self.extensions_type, help="Specify extension of files to download. Ex: pdf,txt,jpg",)
+        parser.add_argument("-j", "--json", action="store_true", help="Use json formatted data in the HTTP POST request. ")
+        parser.add_argument("-H", "--http-headers", metavar="", default={}, type=self.key_value_pairs_type, help="Set custom HTTP headers. Ex: Header1=Value1,Header2=Value2")
+        parser.add_argument("-a", "--user-agent", metavar="", help="User-Agent to use in the HTTP request")
         parser.add_argument("-c", "--cookies", metavar="", type=self.key_value_pairs_type, help="Cookies to use in the HTTP request. Ex: Cookie1=Value1,Cookie2=Value2")
+        parser.add_argument("-b", "--body-data", metavar="", type=self.key_value_pairs_type, help="Body data to use in the HTTP POST request.")
         parser.add_argument("-p", "--proxy", metavar="", type=self.url_type, help="Proxy to use. Ex: http;http://localhost:8080")
         parser.add_argument("-V", "--verify-cert", action="store_true", help="Verify SSL certificates. Default -> False")
 
@@ -52,29 +56,54 @@ class Config:
 
         args = parser.parse_args()
 
+        # parsing arguments
         self.url           = args.url
         self.depth         = args.depth
+        self.http_method   = args.http_method
         self.netloc        = args.netloc
         self.custom_netloc = args.custom_netloc
         self.extensions    = args.extensions
+        self.json          = args.json
         self.http_headers  = args.http_headers
         self.user_agent    = args.user_agent
         self.cookies       = args.cookies
+        self.body_data     = args.body_data
         self.proxy         = args.proxy
         self.verify_cert   = args.verify_cert
-
         self.tasks           = args.tasks
         self.connect_timeout = args.connect_timeout
         self.read_timeout    = args.read_timeout
-
         self.output  = args.output
         self.quiet   = args.quiet 
 
         # asynchronous lock to avoid every task accessing the same resource at the same time
         self.lock     = asyncio.Lock()
 
+        # dynamic user agent for random user agent generation
+        self.dynamic_ua = UserAgent()
+
         # this will contains all results that will saved to a file if specified.
         self.visited_urls = set()
+        
+        # setting static headers to simulate a normal browser.
+        if self.user_agent:
+            self.http_headers.setdefault("User-Agent", self.user_agent)
+        else:
+            self.http_headers.setdefault("User-Agent", self.dynamic_ua.random)
+        self.http_headers.setdefault("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8")
+        self.http_headers.setdefault("Connection", "keep-alive" )
+        self.http_headers.setdefault("Accept-Language", "en-US,en;q=0.5")
+        self.http_headers.setdefault("Accept-Encoding", "gzip, deflate, br")
+        self.http_headers.setdefault("Upgrade-Insecure-Requests", "1")
+        self.http_headers.setdefault("Sec-Fetch-Dest", "document")
+        self.http_headers.setdefault("Sec-Fetch-Mode", "navigate")
+        self.http_headers.setdefault("Sec-Fetch-Site", "none")
+        self.http_headers.setdefault("Sec-Fetch-User", "?1")
+        self.http_headers.setdefault("Cache-Control", "no-cache")
+        if self.json:
+            self.http_headers.setdefault("Content-Type", "application/json")
+
+
 
     def url_type(self, url):
         parsed_url = urlparse(url)
@@ -115,17 +144,20 @@ class Config:
         return pairs_dict     
 
     def show_config(self):
-        exclude = ["visited_urls", "lock",]
+        exclude = ["visited_urls", "lock", ]
         print("=" * 100)
         for attr, value in self.__dict__.items():
             if not attr.startswith("_") and attr not in exclude and value is not None:
-                print("[!] %13s: %-64s"%(attr, value))
+                if attr == "hide_status_code":
+                    print("[!] %13s: %s ..."%(attr, value[:10]))
+                else:
+                    print("[!] %13s: %-64s"%(attr, value))
 
         print("=" * 100)
 
 
 def print_timestamp(msg=""):
-    output_msg = f"{msg} {time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())}"
+    output_msg = f"{msg} {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())}"
     print("=" * 100)
     print(f"%-78s "%(output_msg))
     print("=" * 100)
@@ -171,16 +203,37 @@ def show_urls_as_tree(urls):
 
 
 async def fetch_links(session, url, semaphore):
-    headers = {
-        "User-Agent": config.user_agent 
-    }
+    """
+    Make asynchronous HTTP requests to a URL provided as a parameter using an asynchronous session.
+
+    Args:
+        session (aiohttp.ClientSession): Asynchronous session used to make requests.
+        url (str): The base URL that will be crawled.
+
+    Locks:
+        This function uses a lock (config.lock) to protect the access to the list that contains words and the list that contains the results.
+    """
+
+    # http method specified by user
+    if config.http_method == "GET":
+        http_request = session.get
+    elif config.http_method == "POST":
+        http_request = session.post
 
     url_extension = urlparse(url).path.split(".")[-1]
     async with semaphore:
         links = set()
         try:
-            # Trying get request
-            async with session.get(url, headers=headers) as resp:
+            
+            async with http_request(
+                url,
+                data=config.body_data if not config.json else None,
+                json=config.body_data if config.json else None,
+                headers=config.http_headers,
+                cookies=config.cookies,
+                proxy=None if config.proxy is None else config.proxy.geturl()
+            ) as resp:
+                
                 if resp.status == 200:
                     content_type = resp.headers.get("Content-Type")
 
@@ -194,6 +247,7 @@ async def fetch_links(session, url, semaphore):
 
                     # parsing HTML document
                     if content_type.startswith("text/html"):
+
                         soup = BeautifulSoup(content, 'html.parser')
                         possible_sources = [
                             'a', 'link', 'img', 'script', 'iframe', 'embed', 
@@ -201,6 +255,7 @@ async def fetch_links(session, url, semaphore):
                             'area', 'base', 'meta'
                         ]
 
+                        # extracting links from possible sources
                         for tag in soup.find_all(possible_sources):
                             href = tag.get("href") or tag.get("src") or tag.get("content") or tag.get("srcset") or tag.get("data")
                             if href:
@@ -213,9 +268,11 @@ async def fetch_links(session, url, semaphore):
 
             # saving content of the request inside LOOT directory if the extension of url match one of the config.extensions
             if url_extension in config.extensions:
-                if not os.path.exists("./LOOT"):
-                    os.mkdir("./LOOT")
+                
+                # creating loot directory if not exist
+                os.mkdir("./LOOT") if not os.path.exists("HOLA") else None
 
+                # saving file only if it doesn't exist
                 filename = urlparse(url).path.split("/")[-1]
                 if not os.path.exists(f"./LOOT/{filename}"):
                     async with config.lock:
@@ -308,6 +365,7 @@ async def main():
 if __name__ == "__main__":
     config = Config()
     config.show_config()
+
     try:
         asyncio.run(main())
     except KeyboardInterrupt:

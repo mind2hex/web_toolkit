@@ -6,8 +6,11 @@ import asyncio
 import argparse
 import time
 import re
+import logging
+import sys
+import signal
+import aiohttp.client_exceptions
 from prettytable import PrettyTable
-from inspect import currentframe
 from urllib.parse import urlparse, ParseResult
 from alive_progress import alive_bar
 from colorama import Fore
@@ -28,10 +31,10 @@ class Config:
         
         # General arguments
         parser.add_argument("-u", "--url", metavar="", type=self.url_type, required=True, help="Target url. REQUIRED.",)
-        parser.add_argument("-w", "--wordlist", metavar="", required=True, help="Path to the wordlist to use. REQUIRED.")
+        parser.add_argument("-w", "--wordlist", metavar="", type=argparse.FileType('r', encoding='latin-1'), required=True, help="Path to the wordlist to use. REQUIRED.")
         parser.add_argument("-m", "--http-method", metavar="", choices=["GET", "POST"], default="GET", help="HTTP method to use.")
-        parser.add_argument("-H", "--http-headers", metavar="", type=self.key_value_pairs_type, help="Set custom HTTP headers. Ex: Header1=Value1,Header2=Value2")
-        parser.add_argument("-a", "--user-agent", metavar="", default="webEnum", help="User-Agent to use in the HTTP request")
+        parser.add_argument("-H", "--http-headers", metavar="", default={}, type=self.key_value_pairs_type, help="Set custom HTTP headers. Ex: Header1=Value1,Header2=Value2")
+        parser.add_argument("-a", "--user-agent", metavar="", help="User-Agent to use in the HTTP request")
         parser.add_argument("-r", "--random-ua", action="store_true", help="Randomize user agent.")
         parser.add_argument("-c", "--cookies", metavar="", type=self.key_value_pairs_type, help="Cookies to use in the HTTP request. Ex: Cookie1=Value1,Cookie2=Value2")
         parser.add_argument("-b", "--body-data", metavar="", type=self.key_value_pairs_type, help="Body data to use in the HTTP POST request.")
@@ -66,7 +69,7 @@ class Config:
 
         args = parser.parse_args()
         self.url           = args.url
-        self.wordlist_path = self.validate_wordlist(args.wordlist)
+        self.wordlist      = args.wordlist
         self.extensions    = args.extensions
         self.add_slash     = args.add_slash
         self.http_method   = args.http_method
@@ -96,17 +99,40 @@ class Config:
         #self.hide_content_length = [] if args.hide_content_length is None else self.validate_content_length(args.hide_content_length.split(","))
         #self.hide_web_server     = [] if args.hide_web_server is None else self.validate_web_server(args.hide_web_server.split(","))
         
+        # tasks will run until while this variable is True
+        self.exec_status = True
 
         # create wordlist generator to yield words instead of loading all words to memory
-        self.wordlist       = self.wordlist_generator(self.wordlist_path, self.extensions, self.add_slash)
-        self.wordlist_count = self.count_lines(self.wordlist_path)
-        self.wordlist_count = self.wordlist_count + (self.wordlist_count * len(self.extensions))
+        word_count = self.count_lines(self.wordlist.name)
+        self.wordlist = {
+            "path": self.wordlist.name,
+            "generator": self.wordlist_generator(self.wordlist.name, self.extensions, self.add_slash),
+            "count": word_count + (word_count * len(self.extensions))
+        }
 
         # asynchronous lock to avoid every task accessing the same resource at the same time
         self.lock     = asyncio.Lock()
 
         # dynamic user agent for random user generation
         self.dynamic_ua = UserAgent()
+
+        # setting static headers to simulate a normal browser.
+        if self.user_agent:
+            self.http_headers.setdefault("User-Agent", self.user_agent)
+        else:
+            self.http_headers.setdefault("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/104.0.0.0 Safari/537.36")
+        self.http_headers.setdefault("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8")
+        self.http_headers.setdefault("Accept-Language", "en-US,en;q=0.5")
+        self.http_headers.setdefault("Accept-Encoding", "gzip")
+        self.http_headers.setdefault("Connection", "keep-alive" )
+        self.http_headers.setdefault("Upgrade-Insecure-Requests", "1")
+        self.http_headers.setdefault("Sec-Fetch-Dest", "document")
+        self.http_headers.setdefault("Sec-Fetch-Mode", "navigate")
+        self.http_headers.setdefault("Sec-Fetch-Site", "none")
+        self.http_headers.setdefault("Sec-Fetch-User", "?1")
+        self.http_headers.setdefault("Cache-Control", "max-age")
+        if self.json:
+            self.http_headers.setdefault("Content-Type", "application/json")
         
         # This table will contain all the results from the web enumeration
         self.table = PrettyTable()
@@ -169,43 +195,6 @@ class Config:
         except re.error as e:
             raise argparse.ArgumentTypeError(f"'{regex}' is not a valid regular expression.")
 
-    def validate_wordlist(self, wordlist_path: str) -> str:
-        """simply checks that the wordlist exist and is accessible...
-
-        Args:
-            wordlist_path (str): path to the wordlist.
-
-        Returns:
-            str: returns the path of the wordlist if checks passed successfully.
-        """
-        try:
-            open(wordlist_path, 'r')
-        except FileNotFoundError:
-            show_error(
-                f"Invalid WORDLIST --> {wordlist_path}",
-                f"function::{currentframe().f_code.co_name}",
-                "error while trying to open the wordlist. Check that the wordlist exist",
-            )
-            exit(-1)
-        
-        except PermissionError:
-            show_error(
-                f"Invalid WORDLIST --> {wordlist_path}",
-                f"function::{currentframe().f_code.co_name}",
-                "Insufficient permissions to open the wordlist. Check that the current user has read access to the wordlist",
-            )
-            exit(-1)
-        
-        except IsADirectoryError:
-            show_error(
-                f"Invalid WORDLIST --> {wordlist_path}",
-                f"function::{currentframe().f_code.co_name}",
-                "The specified wordlist is a directory. You must specify a readable file.",
-            )
-            exit(-1)
-
-        return wordlist_path
-
     async def wordlist_generator(self, wordlist_path, extensions=None, add_slash=False):
         """generate a wordlist to yield words.
 
@@ -220,6 +209,11 @@ class Config:
         async with aiofiles.open(wordlist_path, 'r') as wordlist_file:
             async for word in wordlist_file:
                 word = word.strip()
+
+                # ignoring lines that start with #
+                if word.startswith("#") or word.isspace():
+                    continue
+
                 if word:
                     yield word
 
@@ -229,22 +223,6 @@ class Config:
 
                     if add_slash and not word.endswith("/"):
                         yield f"{word}/"
-
-        """
-        wordlist_file = open(wordlist_path, 'r') 
-
-        for word in wordlist_file.readlines():
-            word = word.strip()
-            if word:
-                yield word
-
-                if extensions:
-                    for ext in self.extensions:
-                        yield f"{word}.{ext}"
-
-                if add_slash and not word.endswith("/"):
-                    yield f"{word}/"
-        """
 
     def count_lines(self, wordlist_path:str) -> int:
         """count the lines of a file.
@@ -259,21 +237,34 @@ class Config:
             return sum(1 for line in f)
 
     def show_config(self):
-        exclude = ["dynamic_ua", "wordlist", "table", "lock",]
+        exclude = ["dynamic_ua", "table", "lock", "user_agent"]
         print("=" * 100)
-        for attr, value in self.__dict__.items():
-            if not attr.startswith("_") and attr not in exclude and value is not None:
-                print("[!] %13s: %-64s"%(attr, value))
+        for attr, value in self.__dict__.items():            
+            if not attr.startswith("_") and attr not in exclude and value is not None and value:
+                if attr == "url":
+                    print("[!] %15s: %-64s"%(attr, value.geturl()))
+                elif attr == "wordlist":
+                    print("[!] %15s: %-64s"%("wordlist_path", value['path']))    
+                    print("[!] %15s: %-64s"%("wordlist_count", value['count']))   
+                elif attr == "http_headers":
+                    print("[!] %15s: "%(attr))
+                    for key in value:
+                        print("-" * 10, "%-25s:%s"%(key, value[key]))
+                elif attr == "hide_status_code":
+                    if len(value) > 10:
+                        print("[!] %15s: %s...%s"%(attr, value[:5], value[-5:]))
+                    else:
+                        print("[!] %15s: %-64s"%(attr, value))
+                else:
+                    print("[!] %15s: %-64s"%(attr, value))
 
         print("=" * 100)
+        
 
-
-def show_error(error, origin, msg, ):
-    print(f"{Fore.RED}=================== ERROR ========================={Fore.RESET}")
-    print(f" [X] Location: {origin} --> error")
-    print(f" [X] {error}")
-    print(f" [X] {msg}")
-    print(f"{Fore.RED}===================================================={Fore.RESET}")
+def signal_handler(sig, frame):
+    logger.warning(f"Signal {sig} received, finishing program...")
+    config.exec_status = False
+    sys.exit(0)
 
 
 def print_timestamp(msg=""):
@@ -282,8 +273,19 @@ def print_timestamp(msg=""):
     print(f"%-78s "%(output_msg))
     print("=" * 100)
      
-    
-async def fetch(session, url):
+
+def setup_logger() -> logging.Logger:
+    logger = logging.getLogger('tool_logger')
+    logger.setLevel(logging.DEBUG)
+    ch = logging.StreamHandler()
+    ch.setLevel(logging.DEBUG)
+    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    ch.setFormatter(formatter)
+    logger.addHandler(ch)
+    return logger
+
+
+async def enumerator(session, url):
     """
     Make asynchronous HTTP requests to a URL provided as a parameter using an asynchronous session.
 
@@ -301,91 +303,92 @@ async def fetch(session, url):
     elif config.http_method == "POST":
         http_request = session.post
 
-    # setting static headers.
-    headers = {
-        # keep the connection open after sending the request.
-        "Connection": "keep-alive",
-
-        # user agent specified by user or default.
-        "User-Agent": config.user_agent,
-
-        # force target to send the most recent version of the resource.
-        "Cache-Control": "no-cache"
-    }
-
-    if config.json:
-        headers["Content-Type"] = "application/json"
-
-    while True:
+    while config.exec_status:
         async with config.lock:
             try:
                 # Yielding the next word of the wordlist generator
-                path = f"{url}{await anext(config.wordlist)}"
-            except StopIteration:
-                # stop loop if there is no more words in the wordlist generator
+                path = f"{url}{await anext(config.wordlist['generator'])}"
+            except StopAsyncIteration:
+                # stop loop if there is no more words in the asynchronous wordlist generator
                 break
         
-        # select a random user agent if specified by user
-        if config.random_ua:
-            headers["User-Agent"] = config.dynamic_ua.random
-
-        data    = config.body_data if not config.json else None
-        json    = config.body_data if config.json else None
-        cookies = config.cookies
-        proxy   = None if config.proxy is None else config.proxy.geturl()
-
+        request_successful = False
         request_start_time = asyncio.get_event_loop().time()
-        async with http_request(
-            path, 
-            data=data, 
-            json=json, 
-            headers=headers, 
-            cookies=cookies,
-            proxy=proxy) as resp:
-
-            # checking that the response is not included in the hide_status_code filter
-            if resp.status not in config.hide_status_code:
-
-                request_end_time = asyncio.get_event_loop().time()
-                response_time = f"{request_end_time - request_start_time:.2f}"
-
-                if resp.status in range(200, 300):
-                    sc_color = Fore.GREEN
-                elif resp.status in range(300, 400):
-                    sc_color = Fore.BLUE
-                elif resp.status in range(400, 599):
-                    sc_color = Fore.RED
-                else:
-                    sc_color = Fore.YELLOW
-
-                # getting data from response
-                content = await resp.text(errors="ignore")
-
-                # checking that the response doesnt match with the hide_regex filter
-                if config.hide_regex is None or not re.findall(config.hide_regex, content):
+        for _ in range(config.retries + 1):
+            try:
+                async with http_request(
+                    path, 
+                    data=config.body_data if not config.json else None, 
+                    json=config.body_data if config.json else None, 
+                    headers=config.http_headers, 
+                    cookies=config.cookies,
+                    proxy=None if config.proxy is None else config.proxy.geturl()
+                ) as resp:
                     
-                    content_length = str(len(content))
-                    content_type = resp.headers.get("content-type", "UNKNOWN")
-                    server =  resp.headers.get('Server', 'UNKNOWN')
-
-                    print("".join([
-                        f"{Fore.CYAN}{urlparse(str(resp.url)).path:<50} ",
-                        f"{sc_color}[SC: {resp.status:<3}] ",
-                        f"{Fore.MAGENTA}[CL: {content_length:>5}] ",
-                        f"{Fore.BLUE}[RT: {response_time:>4}] ",
-                        f"{Fore.WHITE}[SRV: {server:>10}] ",
-                        f"{Fore.GREEN}{content_type}{Fore.RESET} "
-                    ]))
+                    # checking that the response is not included in the hide_status_code filter
                     
-                    async with config.lock:
-                        config.table.add_row([
-                            resp.url, 
-                            resp.status, 
-                            content_length, 
-                            response_time, 
-                            server, 
-                            content_type
-                        ])
+                    if resp.status not in config.hide_status_code:
+
+                        # getting data from response
+                        content = await resp.text(errors="ignore")
+                        target_path    = urlparse(str(resp.url)).path
+                        status_code    = resp.status 
+                        content_length = str(len(content))
+                        content_type   = resp.headers.get("content-type", "UNKNOWN")
+                        server         = resp.headers.get('Server', 'UNKNOWN')
+
+                        if resp.status in range(200, 300):
+                            sc_color = Fore.GREEN
+                        elif resp.status in range(300, 400):
+                            sc_color = Fore.BLUE
+                        elif resp.status in range(400, 599):
+                            sc_color = Fore.RED
+                        else:
+                            sc_color = Fore.YELLOW
+
+                        request_end_time = asyncio.get_event_loop().time()
+                        response_time = f"{request_end_time - request_start_time:.2f}"
+
+                        # DATA EXTRACTED SUCCESFULLY
+                        request_successful = True
+
+            except asyncio.TimeoutError:
+                logger.warning(f"TimeoutError: {path}. Retrying ")
+                continue
+
+            except aiohttp.client_exceptions.ClientConnectionError:
+                logger.warning(f"ConnectionError: {path}. Retrying ")
+                continue
+
+            except Exception as e:
+                logger.error(f"UnknownError: {e}. Retrying")
+
+            finally:                
+                break
+
+        # checking that the response doesnt match with the hide_regex filter
+        
+        if request_successful:
+            if config.hide_regex is None or not re.findall(config.hide_regex, content):
+            
+                print("".join([
+                    f"{Fore.CYAN}{target_path:<50} ",
+                    f"{sc_color}[SC: {status_code:<3}] ",
+                    f"{Fore.MAGENTA}[CL: {content_length:>5}] ",
+                    f"{Fore.BLUE}[RT: {response_time:>5}] ",
+                    f"{Fore.WHITE}[SRV: {server:>10}] ",
+                    f"{Fore.GREEN}{content_type}{Fore.RESET} "
+                ]))
+                        
+                async with config.lock:
+                    config.table.add_row([
+                        resp.url, 
+                        resp.status, 
+                        content_length, 
+                        response_time, 
+                        server, 
+                        content_type
+                    ])
 
         # increasing bar count by 1  
         config.bar()    
@@ -393,24 +396,29 @@ async def fetch(session, url):
 
 async def main():
 
-    connector = aiohttp.TCPConnector(
-        ssl=config.verify_cert,
-        force_close=True
-    )
-    timeout   = aiohttp.ClientTimeout(total=config.timeout)
-
     # client session configuration
     client_session =  aiohttp.ClientSession(
-        timeout=timeout, 
-        connector=connector
+        # timeout config
+        timeout=aiohttp.ClientTimeout(
+            total=config.timeout
+        ), 
+
+        # connection config
+        connector=aiohttp.TCPConnector(
+            # (bool) Verify or not SSL certification
+            ssl=config.verify_cert,
+
+            # IDK
+            force_close=True,
+        )
     )
 
     # progress bar configuration
     progress_bar = alive_bar(
-        config.wordlist_count, 
+        config.wordlist['count'], 
         enrich_print=False,
         title="Processing",
-        calibrate=200
+        calibrate=200,
     )
 
     print_timestamp("Starting at")
@@ -418,11 +426,10 @@ async def main():
 
     with progress_bar as bar:
         config.bar = bar
+        url = config.url.geturl()
         async with client_session as session:
-            tasks = [fetch(session, config.url.geturl()) for _ in range(config.tasks)]
-            
-            await asyncio.gather(*tasks, return_exceptions=True)
-
+            tasks = [enumerator(session, url if url.endswith("/") else f"{url}/") for _ in range(config.tasks)]
+            await asyncio.gather(*tasks)
 
     end_time = time.time()
     print_timestamp("Finishing at")
@@ -443,25 +450,26 @@ async def main():
 
     
 if __name__ == "__main__":
+    # logger to show events in different levels
+    logger = setup_logger()
+
     # parsing arguments here to be accessible globally
     config = Config()
     config.show_config()
 
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        print("\n[X] KeyBoard Interrupt...")
-        print("[!] Finishing the program")
+    # signal for program termination and program interruptions
+    signal.signal(signal.SIGTERM, signal_handler)
+    signal.signal(signal.SIGINT, signal_handler)
+
+    asyncio.run(main())
     
     
 # TODO:
-# - Finish input validations
 # - Improve redirection handling
 # - Improve error handling to handle errors instead of finishing program at the first error ocurrence.
 # - Implement asyncio.gather with return_exceptions=True to continue task execution in case on task fail.
 # - Implement concurrent connections controls. (number of concurrent connexions, timewaits, etc).
 # - Implement saving result functionality in json format.
-# - Implement custom message for every HTTP STATUS CODE.
-# - Implement a dynamic table formatting.
+
 
 # FIXME:
