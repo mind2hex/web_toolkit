@@ -829,11 +829,11 @@ async def try_request(http_request, path) -> dict:
         except aiohttp.client_exceptions.ClientConnectionError:
             logger.warning(f"AIOHTTP ConnectionError: {path}. Retrying ")
             continue
-        except aiohttp.client_exceptions.ClientError:
-            logger.warning(f"AIOHTTP ClientError: {path}. Retrying ")
-            continue
         except aiohttp.client_exceptions.ClientResponseError:
             logger.warning(f"AIOHTTP ClientResponseError: {path}. Retrying ")
+            continue
+        except aiohttp.client_exceptions.ClientError:
+            logger.warning(f"AIOHTTP ClientError: {path}. Retrying ")
             continue
 
         break
