@@ -3,20 +3,43 @@
 """
 web_enum.py
 
-This script is responsible for enumerating web endpoints and resources.
-It provides functionalities for handling wordlists, concurrent connections,
-and saving results in html format.
+This module provides functionality for asynchronous web directory and file enumeration.
+It uses modern Python asynchronous features to handle multiple web requests simultaneously,
+improving the efficiency and speed of the enumeration process.
+
+The module includes classes and functions to handle command line arguments, set up the 
+enumeration configuration, perform the web requests, and manage the results. It supports
+custom extensions, HTTP methods, and various filters to tailor the request process and
+output to specific needs.
 
 Classes:
-- Config: Class used to parse and store all CLI arguments.
-
+    Config: Handles parsing and storing command line arguments and user settings.
+    
 Functions:
-- main(): Entry point for the script.
-- enumerator(): Main functionality of the script.
-...
+    main(): The main function that sets up and starts the enumeration process.
+    enumerator(session, url, progress): Performs the web enumeration using a session and url.
+    try_request(http_request, path): Attempts a web request and handles possible exceptions.
+    signal_handler(sig, frame): Handles termination signals to gracefully stop the application.
+    print_timestamp(msg=""): Prints a timestamped message to the console.
+    setup_logger(): Configures and returns a logger for the application.
 
 Usage:
-    python web_enum.py [options]
+    To run the enumeration, execute the script from the command line with the required options:
+    $ python web_enum.py [options] -u {url} -w {wordlist}
+
+    Options include URL to enumerate, wordlist for paths, HTTP method, custom headers, 
+    and more. Detailed usage can be obtained via the command:
+    $ python web_enum.py --help
+
+Example:
+    $ python web_enum.py -u http://example.com -w paths.txt -t 10
+
+This script is designed to be used by security professionals for legitimate purposes such as
+security assessments and penetration testing.
+
+Repository:
+    For more information, updates, or to contribute to the development, visit:
+    https://github.com/mind2hex/web_enum.py
 """
 
 import asyncio
@@ -37,9 +60,42 @@ from fake_useragent import UserAgent
 
 
 class Config:
-    """This class is simply to store parsed arguments"""
+    """
+    A class used to store and manage configuration settings for the web enumerator.
+
+    This class handles the parsing of command line arguments using argparse and stores
+    the settings for various aspects of the enumeration process. It organizes configuration
+    into categories such as general, performance, debugging, and filtering options. The 
+    configurations can be easily accessed throughout the module to control the behavior 
+    of the enumeration.
+
+    Attributes:
+        general (dict): A dictionary containing general settings like URL, wordlist, etc.
+        performance (dict): A dictionary containing performance settings.
+        debug (dict): A dictionary containing debug settings.
+        filters (dict): A dictionary containing filter.
+
+    Methods:
+        parse_general_arguments(parser): Parses general arguments from the command line.
+        parse_performance_arguments(parser): Parses performance-related arguments.
+        parse_debug_arguments(parser): Parses debugging-related arguments.
+        parse_filter_arguments(parser): Parses filtering-related arguments.
+        url_type(url): Validates and parses a URL string.
+        extensions_type(extensions): Converts a comma-separated string into a list.
+        key_value_pairs_type(value): Converts a comma-separated string into a dictionary.
+        status_code_type(value): Parses a string representing HTTP status into a list.
+        regex_type(regex): Validates a regular expression string.
+        wordlist_generator(wordlist_path, ext=None, add_slash=False): A generator for yielding words from a wordlist.
+        count_lines(wordlist_path): Counts the number of lines in a wordlist file.
+        show_config(): Displays the current configuration settings in a readable format.
+    """
 
     def __init__(self):
+        """
+        Initializes the Config class by setting up an argparse.ArgumentParser and parsing
+        the command line arguments to set the configuration options accordingly. The parsed
+        arguments are categorized and stored in class attributes for easy access.
+        """
         parser = argparse.ArgumentParser(
             prog="./web_enum.py",
             usage="./web_enum.py [options] -u {url} -w {wordlist}",
@@ -141,17 +197,12 @@ class Config:
 
     def parse_general_arguments(self, parser) -> None:
         """
-        Adds general argument options to the provided argument parser.
-
-        This method defines and adds a set of general arguments to an `argparse.ArgumentParser` 
-        instance. These arguments include options for specifying the target URL, wordlist, HTTP 
-        method, custom headers, user-agent settings, proxy configurations, and more.
+        Defines and adds general configuration options such as URL, wordlist, and HTTP method
+        to the provided argparse.ArgumentParser object.
 
         Args:
-            parser (argparse.ArgumentParser): The argument parser instance to which 
-                                            the general arguments will be added.
+            parser (argparse.ArgumentParser): The parser to which the arguments are added.
         """
-        # General arguments
         parser.add_argument(
             "-u",
             "--url",
@@ -245,9 +296,6 @@ class Config:
             help="Follow HTTP redirections",
         )
         parser.add_argument(
-            "--usage", action="store_true", help="Print usage message"
-        )
-        parser.add_argument(
             "-V",
             "--verify-cert",
             action="store_true",
@@ -256,16 +304,11 @@ class Config:
 
     def parse_performance_arguments(self, parser) -> None:
         """
-        Adds performance-related argument options to the provided argument parser.
-
-        This method creates a group of performance-related arguments within the 
-        provided `argparse.ArgumentParser` instance. These options control various 
-        performance aspects such as the number of concurrent tasks, request timeout, 
-        wait time between requests, and the number of retries for failed requests.
+        Defines and adds performance-related configuration options like number of tasks and timeouts
+        to the argparse.ArgumentParser object.
 
         Args:
-            parser (argparse.ArgumentParser): The argument parser instance to which 
-                                            the performance arguments will be added.
+            parser (argparse.ArgumentParser): The parser to which the arguments are added.
         """
         performance = parser.add_argument_group("performance options")
         performance.add_argument(
@@ -305,15 +348,11 @@ class Config:
 
     def parse_debug_arguments(self, parser) -> None:
         """
-        Adds debugging and logging argument options to the provided argument parser.
-
-        This method creates a group of debugging-related arguments within the provided 
-        `argparse.ArgumentParser` instance. These options enable verbose mode, specify 
-        output file paths, and control the display of banners and configuration information.
+        Defines and adds debugging-related configuration options such as verbosity and output settings
+        to the argparse.ArgumentParser object.
 
         Args:
-            parser (argparse.ArgumentParser): The argument parser instance to which 
-                                            the debugging arguments will be added.
+            parser (argparse.ArgumentParser): The parser to which the arguments are added.
         """
         # Debugging arguments
         debug = parser.add_argument_group("debugging options")
@@ -336,15 +375,11 @@ class Config:
 
     def parse_filter_arguments(self, parser) -> None:
         """
-        Adds filtering options to the provided argument parser.
-
-        This method creates a group of filtering-related arguments within the provided 
-        `argparse.ArgumentParser` instance. These options allow the user to filter HTTP 
-        responses based on status codes, content length, web server type, or regular expressions.
+        Defines and adds filter-related configuration options to hide or display certain responses
+        based on status codes, content lengths, or other criteria to the argparse.ArgumentParser object.
 
         Args:
-            parser (argparse.ArgumentParser): The argument parser instance to which 
-                                            the filter arguments will be added.
+            parser (argparse.ArgumentParser): The parser to which the arguments are added.
         """
         filters = parser.add_argument_group("filter options")
         filters.add_argument(
@@ -689,7 +724,7 @@ async def enumerator(session, url, progress) -> None:
         None
     """
 
-    # http method specified by user
+    # available http methods
     http_methods = {
         "GET": session.get,
         "POST": session.post
@@ -914,9 +949,8 @@ async def main():
 
     # saving results to a file if specified
     if config.debug["output"]:
-        async with config.lock:
-            with open(config.debug["output"], "w", encoding="utf-8") as f:
-                f.write(config.debug['table'].get_formatted_string("html"))
+        with open(config.debug["output"], "w", encoding="utf-8") as f:
+            f.write(config.debug['table'].get_formatted_string("html"))
 
 
 # logger to show events in different levels
